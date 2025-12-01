@@ -4,7 +4,7 @@ import {
   BoxSelect, Trash2, Plus,
   Check, X, Layout, Eraser,
   Lock, Unlock, Settings, Save, Database, AlertTriangle, Eye,
-  ScanBarcode, ArrowRight, Camera, ShieldAlert, Cpu, RefreshCw
+  ScanBarcode, ArrowRight, Camera, ShieldAlert, Cpu, RefreshCw, Car
 } from 'lucide-react';
 
 const App = () => {
@@ -51,6 +51,21 @@ const App = () => {
   // Interação
   const [interactionMode, setInteractionMode] = useState('none');
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+
+  // --- Car Model Logic ---
+  const [selectedModel, setSelectedModel] = useState(null); // 'Polo Track' | 'Tera'
+  const modelsData = useRef({
+    'Polo Track': {
+      regions: [{ id: '1', name: 'Obj 1 (Polo)', box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }],
+      dataset: null,
+      backgroundSamples: 0
+    },
+    'Tera': {
+      regions: [{ id: '1', name: 'Obj 1 (Tera)', box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }],
+      dataset: null,
+      backgroundSamples: 0
+    }
+  });
 
   useEffect(() => { regionsRef.current = regions; }, [regions]);
 
@@ -546,6 +561,71 @@ const App = () => {
   const activeRegion = regions.find(r => r.id === activeRegionId);
   const isUnbalanced = activeRegion && (activeRegion.samples > backgroundSamples * 2 || backgroundSamples > activeRegion.samples * 2) && backgroundSamples > 0;
 
+  const handleModelSelect = (modelName) => {
+    // 1. Salvar dados do modelo ATUAL (se houver)
+    if (selectedModel && classifier.current) {
+      const currentDataset = classifier.current.getNumClasses() > 0 ? classifier.current.getClassifierDataset() : null;
+      modelsData.current[selectedModel] = {
+        regions: regions,
+        dataset: currentDataset,
+        backgroundSamples: backgroundSamples
+      };
+    }
+
+    // 2. Carregar dados do NOVO modelo
+    const nextData = modelsData.current[modelName];
+
+    // Limpar classificador atual
+    if (classifier.current) {
+      classifier.current.clearAllClasses();
+      if (nextData.dataset) {
+        classifier.current.setClassifierDataset(nextData.dataset);
+      }
+    }
+
+    // Atualizar estados
+    setRegions(nextData.regions);
+    setBackgroundSamples(nextData.backgroundSamples);
+    setSelectedModel(modelName);
+
+    // Resetar estados de visualização
+    setViewMode('setup');
+    setIsPredicting(false);
+    setCurrentBarcode('');
+  };
+
+  if (!selectedModel) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-white font-sans flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl p-8 text-center">
+          <div className="bg-blue-500/10 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-6">
+            <Car size={32} className="text-blue-500" />
+          </div>
+          <h1 className="text-2xl font-bold mb-2">Selecione o Modelo</h1>
+          <p className="text-slate-400 mb-8">Escolha o veículo para carregar as configurações de inspeção.</p>
+
+          <div className="space-y-3">
+            <button
+              onClick={() => handleModelSelect('Polo Track')}
+              className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-blue-500/50 p-4 rounded-xl flex items-center justify-between group transition-all"
+            >
+              <span className="font-bold text-lg group-hover:text-blue-400 transition-colors">Polo Track</span>
+              <ArrowRight size={20} className="text-slate-600 group-hover:text-blue-500" />
+            </button>
+
+            <button
+              onClick={() => handleModelSelect('Tera')}
+              className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-blue-500/50 p-4 rounded-xl flex items-center justify-between group transition-all"
+            >
+              <span className="font-bold text-lg group-hover:text-blue-400 transition-colors">Tera</span>
+              <ArrowRight size={20} className="text-slate-600 group-hover:text-blue-500" />
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-white font-sans flex flex-col h-screen overflow-hidden">
 
@@ -553,10 +633,22 @@ const App = () => {
       <header className="h-14 flex-shrink-0 border-b border-slate-800 flex items-center justify-between px-2 md:px-4 bg-slate-900 z-50">
         <div className="flex items-center gap-2">
           <Layout className="text-blue-500 w-5 h-5 md:w-6 md:h-6" />
-          <h1 className="font-bold tracking-tight text-sm md:text-lg">SmartInspector <span className="text-slate-600 font-normal text-xs ml-1 hidden sm:inline">PRO v3.1 Mobile</span></h1>
+          <div>
+            <h1 className="font-bold tracking-tight text-sm md:text-lg leading-tight">SmartInspector <span className="text-slate-600 font-normal text-xs ml-1 hidden sm:inline">PRO v3.1</span></h1>
+            {selectedModel && <p className="text-[10px] text-slate-400 font-mono leading-none">Modelo: <span className="text-blue-400 font-bold">{selectedModel}</span></p>}
+          </div>
         </div>
 
         <div className="flex gap-2">
+          {selectedModel && (
+            <button
+              onClick={() => handleModelSelect(selectedModel === 'Polo Track' ? 'Tera' : 'Polo Track')}
+              className="px-2 py-1.5 md:px-3 md:py-1.5 rounded text-xs font-bold flex items-center gap-2 transition-colors bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700"
+            >
+              <Car size={14} />
+              <span className="hidden sm:inline">TROCAR</span>
+            </button>
+          )}
           <button
             onClick={() => {
               const newMode = viewMode === 'setup' ? 'operator' : 'setup';
