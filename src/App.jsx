@@ -75,6 +75,12 @@ const App = () => {
     }
   }, [viewMode, currentBarcode]);
 
+  useEffect(() => {
+    if (selectedModel) {
+      startWebcam(selectedDeviceId || null);
+    }
+  }, [selectedModel]);
+
   // --- Inicialização ---
   const loadScript = (src) => {
     return new Promise((resolve, reject) => {
