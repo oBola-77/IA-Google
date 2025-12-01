@@ -66,6 +66,7 @@ const App = () => {
       backgroundSamples: 0
     }
   });
+  const isSwitchingRef = useRef(false);
 
   const serializeDataset = (dataset) => {
     if (!dataset) return null;
@@ -127,7 +128,7 @@ const App = () => {
   }, [selectedModel]);
 
   useEffect(() => {
-    if (selectedModel) saveModelToLocal(selectedModel);
+    if (selectedModel && !isSwitchingRef.current) saveModelToLocal(selectedModel);
   }, [regions, backgroundSamples]);
 
   // --- Inicialização ---
@@ -630,7 +631,9 @@ const App = () => {
   const isUnbalanced = activeRegion && (activeRegion.samples > backgroundSamples * 2 || backgroundSamples > activeRegion.samples * 2) && backgroundSamples > 0;
 
   const handleModelSelect = (modelName) => {
+    isSwitchingRef.current = true;
     if (selectedModel) saveModelToLocal(selectedModel);
+    setSelectedModel(modelName);
     const stored = loadModelFromLocal(modelName);
     if (classifier.current) {
       classifier.current.clearAllClasses();
@@ -652,10 +655,10 @@ const App = () => {
       setRegions(nextData.regions);
       setBackgroundSamples(nextData.backgroundSamples);
     }
-    setSelectedModel(modelName);
     setViewMode('setup');
     setIsPredicting(false);
     setCurrentBarcode('');
+    setTimeout(() => { isSwitchingRef.current = false; }, 0);
   };
 
   if (!selectedModel) {
