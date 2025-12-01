@@ -312,8 +312,15 @@ const App = () => {
       box: { x: 50, y: 50, w: 150, h: 150 },
       samples: 0, status: null, confidence: 0
     };
-    setRegions(prev => [...prev, newRegion]);
+    setRegions(prev => {
+      const updated = [...prev, newRegion];
+      if (selectedModel && modelsData.current[selectedModel]) {
+        modelsData.current[selectedModel].regions = updated.map(r => ({ ...r, box: { ...r.box } }));
+      }
+      return updated;
+    });
     setActiveRegionId(newId);
+    if (selectedModel) saveModelToLocal(selectedModel);
   };
 
   const removeRegion = (id) => {
@@ -325,10 +332,17 @@ const App = () => {
         nextActiveId = remaining[0].id;
       }
     }
-    setRegions(prev => prev.filter(r => r.id !== id));
+    setRegions(prev => {
+      const updated = prev.filter(r => r.id !== id);
+      if (selectedModel && modelsData.current[selectedModel]) {
+        modelsData.current[selectedModel].regions = updated.map(r => ({ ...r, box: { ...r.box } }));
+      }
+      return updated;
+    });
     if (nextActiveId !== activeRegionId) {
       setActiveRegionId(nextActiveId);
     }
+    if (selectedModel) saveModelToLocal(selectedModel);
   };
 
   const clearRegionSamples = (regionId) => {
