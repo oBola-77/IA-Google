@@ -72,6 +72,9 @@ const App = () => {
   });
   const isSwitchingRef = useRef(false);
 
+  const getClassLabel = (regionId) => (selectedModel ? `${selectedModel}::${regionId}` : String(regionId));
+  const getBackgroundLabel = () => (selectedModel ? `${selectedModel}::background` : 'background');
+
   const serializeDataset = (dataset) => {
     if (!dataset) return null;
     const result = {};
@@ -331,7 +334,7 @@ const App = () => {
   const clearRegionSamples = (regionId) => {
     if (!classifier.current) return;
     try {
-      classifier.current.clearClass(regionId);
+      classifier.current.clearClass(getClassLabel(regionId));
     } catch (_) {}
     setRegions(prev => prev.map(r => r.id === regionId ? { ...r, samples: 0, status: null, confidence: 0 } : r));
     if (selectedModel) saveModelToLocal(selectedModel);
@@ -383,7 +386,7 @@ const App = () => {
 
     const activation = getCropTensor(activeRegion.box);
     if (activation) {
-      classifier.current.addExample(activation, activeRegion.id);
+      classifier.current.addExample(activation, getClassLabel(activeRegion.id));
       activation.dispose();
 
       setRegions(prevRegions =>
@@ -399,7 +402,7 @@ const App = () => {
     for (const region of regions) {
       const activation = getCropTensor(region.box);
       if (activation) {
-        classifier.current.addExample(activation, 'background');
+        classifier.current.addExample(activation, getBackgroundLabel());
         activation.dispose();
         successCount++;
       }
@@ -421,17 +424,18 @@ const App = () => {
 
       let resultStatus = 'bad';
       let conf = 0;
+      const label = getClassLabel(region.id);
 
       try {
         const result = await classifier.current.predictClass(activation);
 
-        if (result.label === region.id) {
+        if (result.label === label) {
           conf = result.confidences[result.label] || 0;
           if (conf >= threshold) {
             resultStatus = 'ok';
           }
         } else {
-          conf = result.confidences[region.id] || 0;
+          conf = result.confidences[label] || 0;
           resultStatus = 'bad';
         }
 
