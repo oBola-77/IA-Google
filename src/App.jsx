@@ -67,6 +67,51 @@ const App = () => {
     }
   });
 
+  const serializeDataset = (dataset) => {
+    if (!dataset) return null;
+    const result = {};
+    Object.keys(dataset).forEach((classId) => {
+      const tensor = dataset[classId];
+      const data = Array.from(tensor.dataSync());
+      result[classId] = { data, shape: tensor.shape };
+    });
+    return result;
+  };
+
+  const deserializeDataset = (obj) => {
+    if (!obj) return null;
+    const result = {};
+    Object.keys(obj).forEach((classId) => {
+      const { data, shape } = obj[classId];
+      result[classId] = tf.tensor(data, shape);
+    });
+    return result;
+  };
+
+  const saveModelToLocal = (modelName) => {
+    if (!modelName) return;
+    let dataset = null;
+    if (classifier.current && classifier.current.getNumClasses() > 0) {
+      dataset = classifier.current.getClassifierDataset();
+    }
+    const payload = {
+      regions,
+      backgroundSamples,
+      dataset: serializeDataset(dataset)
+    };
+    try { localStorage.setItem(`modelData:${modelName}`, JSON.stringify(payload)); } catch (_) {}
+  };
+
+  const loadModelFromLocal = (modelName) => {
+    try {
+      const raw = localStorage.getItem(`modelData:${modelName}`);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (_) {
+      return null;
+    }
+  };
+
   useEffect(() => { regionsRef.current = regions; }, [regions]);
 
   useEffect(() => {
@@ -80,6 +125,10 @@ const App = () => {
       startWebcam(selectedDeviceId || null);
     }
   }, [selectedModel]);
+
+  useEffect(() => {
+    if (selectedModel) saveModelToLocal(selectedModel);
+  }, [regions, backgroundSamples]);
 
   // --- Inicialização ---
   const loadScript = (src) => {
@@ -280,6 +329,7 @@ const App = () => {
       classifier.current.clearClass(regionId);
     } catch (_) {}
     setRegions(prev => prev.map(r => r.id === regionId ? { ...r, samples: 0, status: null, confidence: 0 } : r));
+    if (selectedModel) saveModelToLocal(selectedModel);
   };
 
   // --- IA Core ---
@@ -334,6 +384,7 @@ const App = () => {
       setRegions(prevRegions =>
         prevRegions.map(r => r.id === activeRegionId ? { ...r, samples: r.samples + 1 } : r)
       );
+      if (selectedModel) saveModelToLocal(selectedModel);
     }
   };
 
@@ -348,7 +399,10 @@ const App = () => {
         successCount++;
       }
     }
-    if (successCount > 0) setBackgroundSamples(prev => prev + 1);
+    if (successCount > 0) {
+      setBackgroundSamples(prev => prev + 1);
+      if (selectedModel) saveModelToLocal(selectedModel);
+    }
   };
 
   const predictAllRegions = async () => {
@@ -576,33 +630,29 @@ const App = () => {
   const isUnbalanced = activeRegion && (activeRegion.samples > backgroundSamples * 2 || backgroundSamples > activeRegion.samples * 2) && backgroundSamples > 0;
 
   const handleModelSelect = (modelName) => {
-    // 1. Salvar dados do modelo ATUAL (se houver)
-    if (selectedModel && classifier.current) {
-      const currentDataset = classifier.current.getNumClasses() > 0 ? classifier.current.getClassifierDataset() : null;
-      modelsData.current[selectedModel] = {
-        regions: regions,
-        dataset: currentDataset,
-        backgroundSamples: backgroundSamples
-      };
-    }
-
-    // 2. Carregar dados do NOVO modelo
-    const nextData = modelsData.current[modelName];
-
-    // Limpar classificador atual
+    if (selectedModel) saveModelToLocal(selectedModel);
+    const stored = loadModelFromLocal(modelName);
     if (classifier.current) {
       classifier.current.clearAllClasses();
-      if (nextData.dataset) {
-        classifier.current.setClassifierDataset(nextData.dataset);
+      if (stored && stored.dataset) {
+        const ds = deserializeDataset(stored.dataset);
+        if (ds) classifier.current.setClassifierDataset(ds);
+      } else {
+        const nextData = modelsData.current[modelName];
+        if (nextData && nextData.dataset) {
+          classifier.current.setClassifierDataset(nextData.dataset);
+        }
       }
     }
-
-    // Atualizar estados
-    setRegions(nextData.regions);
-    setBackgroundSamples(nextData.backgroundSamples);
+    if (stored) {
+      setRegions(stored.regions || modelsData.current[modelName].regions);
+      setBackgroundSamples(stored.backgroundSamples ?? modelsData.current[modelName].backgroundSamples);
+    } else {
+      const nextData = modelsData.current[modelName];
+      setRegions(nextData.regions);
+      setBackgroundSamples(nextData.backgroundSamples);
+    }
     setSelectedModel(modelName);
-
-    // Resetar estados de visualização
     setViewMode('setup');
     setIsPredicting(false);
     setCurrentBarcode('');
@@ -657,15 +707,8 @@ const App = () => {
           {selectedModel && (
             <button
               onClick={() => {
-                if (selectedModel && classifier.current) {
-                  const currentDataset = classifier.current.getNumClasses() > 0 ? classifier.current.getClassifierDataset() : null;
-                  modelsData.current[selectedModel] = {
-                    regions: regions,
-                    dataset: currentDataset,
-                    backgroundSamples: backgroundSamples
-                  };
-                  classifier.current.clearAllClasses();
-                }
+                if (selectedModel) saveModelToLocal(selectedModel);
+                if (classifier.current) classifier.current.clearAllClasses();
                 setSelectedModel(null);
                 setViewMode('setup');
                 setIsPredicting(false);
