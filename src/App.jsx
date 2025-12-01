@@ -578,7 +578,7 @@ const App = () => {
       <div className="flex flex-col md:flex-row flex-1 overflow-hidden relative">
 
         {/* Câmera Area */}
-        <div className="flex-1 relative bg-black flex items-center justify-center oanverflow-hidden p-2 md:p-4 order-1 md:order-1">
+        <div className="flex-1 relative bg-black flex items-center justify-center overflow-hidden p-2 md:p-4 order-1 md:order-1">
           <div className="relative w-full h-full max-w-5xl aspect-video rounded-lg overflow-hidden border border-slate-800 shadow-2xl bg-zinc-900 flex items-center justify-center">
 
             {/* Mensagem de Erro de Câmera */}
