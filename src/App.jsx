@@ -42,7 +42,7 @@ const App = () => {
 
   // Dados
   const [regions, setRegions] = useState([
-    { id: '1', name: 'Obj 1', box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }
+    { id: '1', name: 'Objeto 1', box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }
   ]);
   const [activeRegionId, setActiveRegionId] = useState('1');
 
@@ -56,12 +56,12 @@ const App = () => {
   const [selectedModel, setSelectedModel] = useState(null); // 'Polo Track' | 'Tera'
   const modelsData = useRef({
     'Polo Track': {
-      regions: [{ id: '1', name: 'Obj 1 (Polo)', box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }],
+      regions: [{ id: '1', name: 'Objeto 1 (Polo)', box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }],
       dataset: null,
       backgroundSamples: 0
     },
     'Tera': {
-      regions: [{ id: '1', name: 'Obj 1 (Tera)', box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }],
+      regions: [{ id: '1', name: 'Objeto 1 (Tera)', box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }],
       dataset: null,
       backgroundSamples: 0
     }
