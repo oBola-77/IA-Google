@@ -1,10 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import * as tf from '@tensorflow/tfjs';
 import {
-  BoxSelect, Trash2, Plus,
+  Trash2, Plus,
   Check, X, Layout, Eraser,
   Lock, Unlock, Settings, Save, Database, AlertTriangle, Eye,
-  ScanBarcode, ArrowRight, Camera, ShieldAlert, Cpu, RefreshCw, Car
+  ScanBarcode, ArrowRight, ShieldAlert, RefreshCw, Car
 } from 'lucide-react';
 
 const App = () => {
@@ -20,10 +20,10 @@ const App = () => {
   const regionsRef = useRef([]);
 
   // --- Estados ---
-  const [isModelLoading, setIsModelLoading] = useState(true);
+  const [, setIsModelLoading] = useState(true);
   const [loadingError, setLoadingError] = useState(null);
   const [isCameraReady, setIsCameraReady] = useState(false);
-  const [backend, setBackend] = useState('detecting...');
+  const [, setBackend] = useState('detecting...');
 
   // Câmeras
   const [videoDevices, setVideoDevices] = useState([]);
@@ -47,10 +47,14 @@ const App = () => {
   const [activeRegionId, setActiveRegionId] = useState('1');
 
   const [history, setHistory] = useState([]);
+  const [, setAuditLogs] = useState([]);
 
   // Interação
   const [interactionMode, setInteractionMode] = useState('none');
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [actionMessage, setActionMessage] = useState(null);
+  const [actionMessageType, setActionMessageType] = useState('success');
 
   // --- Car Model Logic ---
   const [selectedModel, setSelectedModel] = useState(null); // 'Polo Track' | 'Tera'
@@ -629,6 +633,51 @@ const App = () => {
 
   const activeRegion = regions.find(r => r.id === activeRegionId);
   const isUnbalanced = activeRegion && (activeRegion.samples > backgroundSamples * 2 || backgroundSamples > activeRegion.samples * 2) && backgroundSamples > 0;
+  const hasPhotos = (classifier.current && classifier.current.getNumClasses() > 0) || regions.some(r => r.samples > 0) || backgroundSamples > 0 || history.length > 0;
+
+  const handleDeleteAllPhotos = async () => {
+    if (isPredicting) {
+      setActionMessage('Pare a validação antes de apagar');
+      setActionMessageType('error');
+      return;
+    }
+    if (!hasPhotos || isDeleting) return;
+    const ok = window.confirm('Confirma apagar todas as fotos? Essa ação é permanente.');
+    if (!ok) return;
+    setIsDeleting(true);
+    setActionMessage(null);
+    try {
+      try {
+        localStorage.setItem('__write_test', '1');
+        localStorage.removeItem('__write_test');
+      } catch (e) {
+        setActionMessage('Sem permissão para escrever no armazenamento local');
+        setActionMessageType('error');
+        setIsDeleting(false);
+        return;
+      }
+
+      Object.keys(modelsData.current).forEach(name => {
+        try { localStorage.removeItem(`modelData:${name}`); } catch (_) {}
+      });
+
+      if (classifier.current) classifier.current.clearAllClasses();
+      setRegions(prev => prev.map(r => ({ ...r, samples: 0, status: null, confidence: 0 })));
+      setBackgroundSamples(0);
+      setHistory([]);
+
+      setActionMessage('Fotos deletadas com sucesso');
+      setActionMessageType('success');
+
+      const totalSamples = regions.reduce((acc, r) => acc + r.samples, 0) + backgroundSamples;
+      setAuditLogs(prev => [{ id: Date.now(), type: 'DELETE_ALL_PHOTOS', model: selectedModel, timestamp: new Date().toISOString(), totalSamples }, ...prev]);
+    } catch (err) {
+      setActionMessage('Erro ao deletar fotos');
+      setActionMessageType('error');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   const handleModelSelect = (modelName) => {
     isSwitchingRef.current = true;
@@ -919,6 +968,27 @@ const App = () => {
                   </div>
                   <span className="text-xs font-mono">{backgroundSamples}</span>
                 </button>
+
+                <button
+                  onClick={handleDeleteAllPhotos}
+                  disabled={!hasPhotos || isPredicting || isDeleting}
+                  className={`mt-2 w-full py-3 ${(!hasPhotos || isPredicting || isDeleting) ? 'bg-slate-700 text-slate-500 border border-slate-700 cursor-not-allowed' : 'bg-red-600 hover:bg-red-500 text-white border border-red-500'} rounded flex justify-between items-center px-4 active:scale-95 transition-transform`}
+                >
+                  <div className="flex items-center gap-2 text-xs font-bold">
+                    <Trash2 size={16} /> DELETAR TODAS AS FOTOS
+                  </div>
+                  {isDeleting ? (
+                    <RefreshCw size={14} className="animate-spin" />
+                  ) : (
+                    <span className="text-xs font-mono">{hasPhotos ? 'pronto' : 'vazio'}</span>
+                  )}
+                </button>
+
+                {actionMessage && (
+                  <div className={`mt-2 text-[11px] px-2 py-1 rounded border ${actionMessageType === 'success' ? 'text-green-400 bg-green-400/10 border-green-400/20' : 'text-red-400 bg-red-400/10 border-red-400/20'}`}>
+                    {actionMessage}
+                  </div>
+                )}
               </div>
             </div>
           )}
