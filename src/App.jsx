@@ -700,14 +700,18 @@ const App = () => {
         }
       }
     }
-    if (stored) {
-      setRegions(stored.regions || modelsData.current[modelName].regions);
-      setBackgroundSamples(stored.backgroundSamples ?? modelsData.current[modelName].backgroundSamples);
-    } else {
-      const nextData = modelsData.current[modelName];
-      setRegions(nextData.regions);
-      setBackgroundSamples(nextData.backgroundSamples);
-    }
+    const sourceRegions = (stored && stored.regions) ? stored.regions : modelsData.current[modelName].regions;
+    const newRegions = (sourceRegions || []).map(r => ({
+      id: r.id,
+      name: r.name,
+      box: { ...r.box },
+      samples: r.samples || 0,
+      status: null,
+      confidence: 0
+    }));
+    setRegions(newRegions);
+    if (newRegions.length > 0) setActiveRegionId(newRegions[0].id);
+    setBackgroundSamples((stored && stored.backgroundSamples != null) ? stored.backgroundSamples : (modelsData.current[modelName].backgroundSamples || 0));
     setViewMode('setup');
     setIsPredicting(false);
     setCurrentBarcode('');
