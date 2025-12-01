@@ -245,7 +245,7 @@ const App = () => {
     const newId = Date.now().toString();
     const newRegion = {
       id: newId,
-      name: `Obj ${regions.length + 1}`,
+      name: `Objeto ${regions.length + 1}`,
       box: { x: 50, y: 50, w: 150, h: 150 },
       samples: 0, status: null, confidence: 0
     };
@@ -266,6 +266,14 @@ const App = () => {
     if (nextActiveId !== activeRegionId) {
       setActiveRegionId(nextActiveId);
     }
+  };
+
+  const clearRegionSamples = (regionId) => {
+    if (!classifier.current) return;
+    try {
+      classifier.current.clearClass(regionId);
+    } catch (_) {}
+    setRegions(prev => prev.map(r => r.id === regionId ? { ...r, samples: 0, status: null, confidence: 0 } : r));
   };
 
   // --- IA Core ---
@@ -642,7 +650,21 @@ const App = () => {
         <div className="flex gap-2">
           {selectedModel && (
             <button
-              onClick={() => handleModelSelect(selectedModel === 'Polo Track' ? 'Tera' : 'Polo Track')}
+              onClick={() => {
+                if (selectedModel && classifier.current) {
+                  const currentDataset = classifier.current.getNumClasses() > 0 ? classifier.current.getClassifierDataset() : null;
+                  modelsData.current[selectedModel] = {
+                    regions: regions,
+                    dataset: currentDataset,
+                    backgroundSamples: backgroundSamples
+                  };
+                  classifier.current.clearAllClasses();
+                }
+                setSelectedModel(null);
+                setViewMode('setup');
+                setIsPredicting(false);
+                setCurrentBarcode('');
+              }}
               className="px-2 py-1.5 md:px-3 md:py-1.5 rounded text-xs font-bold flex items-center gap-2 transition-colors bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700"
             >
               <Car size={14} />
@@ -809,13 +831,21 @@ const App = () => {
                     </div>
 
                     {r.id === activeRegionId && (
-                      <button
-                        onClick={addObjectExample}
-                        className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white rounded flex justify-between items-center px-3"
-                      >
-                        <span className="text-xs font-bold">Gravar OK (Toque)</span>
-                        <span className="text-xs bg-blue-800 px-1.5 rounded">{r.samples}</span>
-                      </button>
+                      <div className="space-y-2">
+                        <button
+                          onClick={addObjectExample}
+                          className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white rounded flex justify-between items-center px-3"
+                        >
+                          <span className="text-xs font-bold">Gravar OK (Toque)</span>
+                          <span className="text-xs bg-blue-800 px-1.5 rounded">{r.samples}</span>
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); clearRegionSamples(r.id); }}
+                          className="w-full py-2 bg-slate-700 hover:bg-slate-600 text-white rounded flex justify-between items-center px-3"
+                        >
+                          <span className="text-xs font-bold flex items-center gap-2"><Eraser size={14} /> Apagar fotos</span>
+                        </button>
+                      </div>
                     )}
                   </div>
                 ))}
