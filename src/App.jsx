@@ -512,7 +512,7 @@ const App = () => {
     };
 
     loadSupabaseData();
-  }, [selectedModel]);
+  }, [selectedModel]); // Dependência corrigida
 
   const captureCropBase64 = (box) => {
     if (!videoRef.current) return null;
