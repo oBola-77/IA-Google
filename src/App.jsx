@@ -4,7 +4,7 @@ import {
   BoxSelect, Trash2, Plus,
   Check, X, Layout, Eraser,
   Lock, Unlock, Settings, Save, Database, AlertTriangle, Eye,
-  ScanBarcode, ArrowRight, Camera
+  ScanBarcode, ArrowRight, Camera, Car
 } from 'lucide-react';
 import { supabase } from './supabaseClient';
 
