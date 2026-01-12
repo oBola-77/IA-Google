@@ -255,7 +255,7 @@ const App = () => {
         window.tf = tf;
         await tf.setBackend('webgl').catch(() => console.log("WebGL não disponível, usando CPU"));
         await tf.ready();
-        setBackend(tf.getBackend());
+        console.log("Backend atual:", tf.getBackend());
 
         await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet');
         await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/knn-classifier');
@@ -622,13 +622,13 @@ const App = () => {
       if (!isMounted) return;
       if (isPredicting && currentBarcode) {
         await predictAllRegions();
-        predictTimeoutRef.current = setTimeout(loopPrediction, 333);
+        predictRef.current = setTimeout(loopPrediction, 333);
       }
     };
 
     if (isPredicting && currentBarcode) loopPrediction();
     else {
-      if (predictTimeoutRef.current) clearTimeout(predictTimeoutRef.current);
+      if (predictRef.current) clearTimeout(predictRef.current);
       setRegions(prev => prev.map(r => ({ ...r, status: null, confidence: 0 })));
     }
     return () => { if (predictRef.current) cancelAnimationFrame(predictRef.current); };
