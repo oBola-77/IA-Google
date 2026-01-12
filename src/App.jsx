@@ -664,68 +664,7 @@ const App = () => {
     }
   };
 
-  // --- Interação Mouse ---
-  const handleMouseDown = (e) => {
-    if (viewMode === 'operator') return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const inputX = coords.clientX - rect.left;
-    const inputY = coords.clientY - rect.top;
-    const HANDLE_SIZE = 30;
 
-    const reversedRegions = [...regions].reverse();
-    for (const region of reversedRegions) {
-      const { x, y, w, h } = region.box;
-      const isActive = region.id === activeRegionId;
-
-      if (isActive) {
-        if (mouseX > x + w - HANDLE_SIZE && mouseX < x + w + HANDLE_SIZE &&
-          mouseY > y + h - HANDLE_SIZE && mouseY < y + h + HANDLE_SIZE) {
-          setInteractionMode('resizing');
-          setDragStart({ x: inputX, y: inputY });
-          return;
-        }
-      }
-      if (inputX > x && inputX < x + w && inputY > y && inputY < y + h) {
-        setActiveRegionId(region.id);
-        setInteractionMode('dragging');
-        setDragStart({ x: inputX - x, y: inputY - y });
-        return;
-      }
-    }
-  };
-
-  const handleInputMove = (e) => {
-    if (interactionMode === 'none' || viewMode === 'operator') return;
-    if (e.cancelable) e.preventDefault();
-
-    const coords = getClientCoordinates(e);
-    const rect = canvasRef.current.getBoundingClientRect();
-    const inputX = coords.clientX - rect.left;
-    const inputY = coords.clientY - rect.top;
-
-    const activeIndex = regions.findIndex(r => r.id === activeRegionId);
-    if (activeIndex === -1) return;
-
-    const currentRegion = regions[activeIndex];
-    let newBox = { ...currentRegion.box };
-
-    if (interactionMode === 'dragging') {
-      newBox.x = Math.max(0, Math.min(canvasRef.current.width - newBox.w, inputX - dragStart.x));
-      newBox.y = Math.max(0, Math.min(canvasRef.current.height - newBox.h, inputY - dragStart.y));
-    } else if (interactionMode === 'resizing') {
-      const newWidth = Math.max(40, inputX - newBox.x);
-      const newHeight = Math.max(40, inputY - newBox.y);
-      newBox.w = Math.min(newWidth, canvasRef.current.width - newBox.x);
-      newBox.h = Math.min(newHeight, canvasRef.current.height - newBox.y);
-    }
-    setRegions(prev => {
-      const updated = [...prev];
-      updated[activeIndex] = { ...currentRegion, box: newBox };
-      return updated;
-    });
-  };
-
-  const handleInputEnd = () => setInteractionMode('none');
 
   // --- Loop Visual ---
   const loop = () => {
@@ -903,6 +842,107 @@ const App = () => {
     );
   }
 
+  // --- Mouse Handlers ---
+  const getClientCoordinates = (e) => {
+    if (e.touches && e.touches.length > 0) {
+      return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    }
+    return { x: e.clientX, y: e.clientY };
+  };
+
+  const handleMouseDown = (e) => {
+    if (viewMode !== 'setup') return;
+    const { x, y } = getClientCoordinates(e);
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scaleX = videoRef.current ? videoRef.current.videoWidth / rect.width : 1;
+    const scaleY = videoRef.current ? videoRef.current.videoHeight / rect.height : 1;
+    const mouseX = (x - rect.left) * scaleX;
+    const mouseY = (y - rect.top) * scaleY;
+
+    // Check resize handles first (simple 10px threshold)
+    const activeRegion = regions.find(r => r.id === activeRegionId);
+    if (activeRegion) {
+      const { x: rx, y: ry, w: rw, h: rh } = activeRegion.box;
+      if (Math.abs(mouseX - (rx + rw)) < 20 && Math.abs(mouseY - (ry + rh)) < 20) {
+        setInteractionMode('resize');
+        setDragStart({ x: mouseX, y: mouseY });
+        return;
+      }
+    }
+
+    // Check move
+    const clickedRegion = regions.find(r =>
+      mouseX >= r.box.x && mouseX <= r.box.x + r.box.w &&
+      mouseY >= r.box.y && mouseY <= r.box.y + r.box.h
+    );
+
+    if (clickedRegion) {
+      setActiveRegionId(clickedRegion.id);
+      setInteractionMode('move');
+      setDragStart({ x: mouseX, y: mouseY });
+    }
+  };
+
+  const handleMouseMove = (e) => {
+    if (viewMode !== 'setup' || interactionMode === 'none') return;
+    const { x, y } = getClientCoordinates(e);
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scaleX = videoRef.current ? videoRef.current.videoWidth / rect.width : 1;
+    const scaleY = videoRef.current ? videoRef.current.videoHeight / rect.height : 1;
+    const mouseX = (x - rect.left) * scaleX;
+    const mouseY = (y - rect.top) * scaleY;
+
+    const dx = mouseX - dragStart.x;
+    const dy = mouseY - dragStart.y;
+
+    setRegions(prev => {
+      const updated = prev.map(r => {
+        if (r.id === activeRegionId) {
+          const newBox = { ...r.box };
+          if (interactionMode === 'move') {
+            newBox.x += dx;
+            newBox.y += dy;
+          } else if (interactionMode === 'resize') {
+            newBox.w = Math.max(20, newBox.w + dx);
+            newBox.h = Math.max(20, newBox.h + dy);
+          }
+          return { ...r, box: newBox };
+        }
+        return r;
+      });
+
+      // Update local storage ref immediately for persistence
+      if (selectedModel && modelsData.current[selectedModel]) {
+        modelsData.current[selectedModel].regions = updated.map(r => ({ ...r, box: { ...r.box } }));
+      }
+
+      return updated;
+    });
+
+    setDragStart({ x: mouseX, y: mouseY });
+  };
+
+  const handleMouseUp = () => {
+    if (interactionMode !== 'none') {
+      setInteractionMode('none');
+      if (selectedModel) saveModelToLocal(selectedModel);
+    }
+  };
+
+  if (loadingError) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+        <div className="bg-slate-900 p-8 rounded-2xl border border-red-900/50 max-w-md text-center">
+          <AlertTriangle size={48} className="text-red-500 mx-auto mb-4" />
+          <h2 className="text-xl font-bold text-white mb-2">Erro de Inicialização</h2>
+          <p className="text-slate-400 mb-6">{loadingError}</p>
+          <button onClick={handleRetryCamera} className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded-lg font-bold">
+            Tentar Novamente
+          </button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="min-h-screen bg-slate-950 text-white font-sans flex flex-col h-screen overflow-hidden">
 
