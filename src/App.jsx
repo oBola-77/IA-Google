@@ -419,18 +419,18 @@ const App = () => {
   // Carregar dados do Supabase
   useEffect(() => {
     const loadSupabaseData = async () => {
-      if (!classifier.current || !mobilenetModel.current) return;
+      if (!classifier.current || !mobilenetModel.current || !selectedModel) return;
 
-      setIsModelLoading(true);
-      classifier.current.clearAllClasses();
-
-      // Resetar contagem de samples visual
-      setRegions(prev => prev.map(r => ({ ...r, samples: 0 })));
-      setBackgroundSamples(0);
+      // setIsModelLoading(true); // Removido pois o state não existe mais
+      // classifier.current.clearAllClasses(); // Removido para não limpar dados locais carregados
 
       try {
         // 1. Carregar Exemplos do Modelo (Polo ou Tera)
-        const tableName = currentModel.toLowerCase();
+        // Mapear nome do modelo para nome da tabela
+        let tableName = selectedModel.toLowerCase();
+        if (tableName.includes('polo')) tableName = 'polo';
+        if (tableName.includes('tera')) tableName = 'tera';
+
         console.log(`Carregando dados da tabela: ${tableName}`);
 
         const { data: modelData, error: modelError } = await supabase
@@ -469,12 +469,11 @@ const App = () => {
           // Update state ONCE after processing all images
           setRegions(prev => prev.map(r => ({
             ...r,
-            samples: sampleCounts[r.id] || 0
+            samples: (r.samples || 0) + (sampleCounts[r.id] || 0) // Add to existing samples
           })));
         }
 
         // 2. Carregar Fundos (Tabela fotoFundo)
-        // Assumindo que a tabela é 'fotofundo' (minúsculo)
         const { data: bgData, error: bgError } = await supabase
           .from('fotofundo')
           .select('*');
@@ -483,6 +482,7 @@ const App = () => {
           console.error('Erro ao carregar fotofundo:', bgError);
         } else if (bgData) {
           console.log(`Carregado ${bgData.length} imagens de fundo`);
+          let newBgSamples = 0;
           for (const row of bgData) {
             try {
               if (!row.url) continue;
@@ -496,24 +496,23 @@ const App = () => {
               classifier.current.addExample(activation, 'background');
               activation.dispose();
 
-              setBackgroundSamples(prev => prev + 1);
+              newBgSamples++;
             } catch (err) {
               console.error('Erro processando imagem de fundo:', err);
             }
           }
+          setBackgroundSamples(prev => prev + newBgSamples);
         }
 
       } catch (e) {
         console.error('Erro geral loading:', e);
       } finally {
-        setIsModelLoading(false);
+        // setIsModelLoading(false);
       }
     };
 
-    if (!isModelLoading) {
-      loadSupabaseData();
-    }
-  }, [currentModel, isModelLoading]);
+    loadSupabaseData();
+  }, [selectedModel]);
 
   const captureCropBase64 = (box) => {
     if (!videoRef.current) return null;
