@@ -4,7 +4,7 @@ import {
   BoxSelect, Trash2, Plus,
   Check, X, Layout, Eraser,
   Lock, Unlock, Settings, Save, Database, AlertTriangle, Eye,
-  ScanBarcode, ArrowRight, Camera, Car
+  ScanBarcode, ArrowRight, Camera
 } from 'lucide-react';
 import { supabase } from './supabaseClient';
 
@@ -15,13 +15,13 @@ const App = () => {
   const classifier = useRef(null);
   const mobilenetModel = useRef(null);
   const requestRef = useRef(null);
-  const predictTimeoutRef = useRef(null);
+  const predictRef = useRef(null);
   const barcodeInputRef = useRef(null);
 
   const regionsRef = useRef([]);
 
   // --- Estados ---
-  const [isModelLoading, setIsModelLoading] = useState(true);
+  const [, setIsModelLoading] = useState(true);
   const [loadingError, setLoadingError] = useState(null);
   const [isCameraReady, setIsCameraReady] = useState(false);
 
@@ -44,15 +44,84 @@ const App = () => {
   const [backgroundSamples, setBackgroundSamples] = useState(0);
 
   // Dados
-  // Dados
-  const [regions, setRegions] = useState([]);
-  const [activeRegionId, setActiveRegionId] = useState(null);
+  const [regions, setRegions] = useState([
+    { id: '1', name: 'Objeto 1', box: { x: 50, y: 50, w: 100, h: 100 }, samples: 0, status: null, confidence: 0 }
+  ]);
+  const [activeRegionId, setActiveRegionId] = useState('1');
 
   const [history, setHistory] = useState([]);
+  const [, setAuditLogs] = useState([]);
 
   // Interação
   const [interactionMode, setInteractionMode] = useState('none');
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [actionMessage, setActionMessage] = useState(null);
+  const [actionMessageType, setActionMessageType] = useState('success');
+
+  // --- Car Model Logic ---
+  const [selectedModel, setSelectedModel] = useState(null); // 'Polo Track' | 'Tera'
+  const modelsData = useRef({
+    'Polo Track': {
+      regions: [{ id: '1', name: 'Objeto 1 (Polo)', box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }],
+      dataset: null,
+      backgroundSamples: 0
+    },
+    'Tera': {
+      regions: [{ id: '1', name: 'Objeto 1 (Tera)', box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }],
+      dataset: null,
+      backgroundSamples: 0
+    }
+  });
+  const isSwitchingRef = useRef(false);
+
+  const getClassLabel = (regionId) => (selectedModel ? `${selectedModel}::${regionId}` : String(regionId));
+  const getBackgroundLabel = () => (selectedModel ? `${selectedModel}::background` : 'background');
+
+  const serializeDataset = (dataset) => {
+    if (!dataset) return null;
+    const result = {};
+    Object.keys(dataset).forEach((classId) => {
+      const tensor = dataset[classId];
+      const data = Array.from(tensor.dataSync());
+      result[classId] = { data, shape: tensor.shape };
+    });
+    return result;
+  };
+
+  const deserializeDataset = (obj) => {
+    if (!obj) return null;
+    const result = {};
+    Object.keys(obj).forEach((classId) => {
+      const { data, shape } = obj[classId];
+      result[classId] = tf.tensor(data, shape);
+    });
+    return result;
+  };
+
+  const saveModelToLocal = (modelName) => {
+    if (!modelName) return;
+    let dataset = null;
+    if (classifier.current && classifier.current.getNumClasses() > 0) {
+      dataset = classifier.current.getClassifierDataset();
+    }
+    const payload = {
+      regions,
+      backgroundSamples,
+      dataset: serializeDataset(dataset)
+    };
+    try { localStorage.setItem(`modelData:${modelName}`, JSON.stringify(payload)); } catch (_) { }
+  };
+
+  const loadModelFromLocal = (modelName) => {
+    try {
+      const raw = localStorage.getItem(`modelData:${modelName}`);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (_) {
+      return null;
+    }
+  };
 
   // Carregar Regiões quando o Modelo Mudar
   useEffect(() => {
@@ -87,9 +156,19 @@ const App = () => {
 
   useEffect(() => {
     if (viewMode === 'operator' && !currentBarcode && barcodeInputRef.current) {
-      barcodeInputRef.current.focus();
+      setTimeout(() => barcodeInputRef.current?.focus(), 100);
     }
   }, [viewMode, currentBarcode]);
+
+  useEffect(() => {
+    if (selectedModel) {
+      startWebcam(selectedDeviceId || null);
+    }
+  }, [selectedModel]);
+
+  useEffect(() => {
+    if (selectedModel && !isSwitchingRef.current) saveModelToLocal(selectedModel);
+  }, [regions, backgroundSamples]);
 
   // --- Inicialização ---
   const loadScript = (src) => {
@@ -102,65 +181,24 @@ const App = () => {
     });
   };
 
-  useEffect(() => {
-    const loadModels = async () => {
-      try {
-        window.tf = tf;
-        await tf.ready();
-        await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet');
-        await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/knn-classifier');
-        await new Promise(r => setTimeout(r, 500));
-
-        if (window.knnClassifier && window.mobilenet) {
-          classifier.current = window.knnClassifier.create();
-          mobilenetModel.current = await window.mobilenet.load();
-          setIsModelLoading(false);
-        } else {
-          throw new Error('Err: Modelos não carregaram.');
-        }
-      } catch (error) {
-        setLoadingError("Erro ao carregar IA.");
-        setIsModelLoading(false);
+  const getDevices = async () => {
+    try {
+      // Solicita permissão primeiro para conseguir listar os nomes dos dispositivos
+      await navigator.mediaDevices.getUserMedia({ video: true });
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cameras = devices.filter(device => device.kind === 'videoinput');
+      setVideoDevices(cameras);
+      if (cameras.length > 0) {
+        // Não seta o ID aqui para deixar o startWebcam escolher o padrão inicialmente
       }
-    };
-
-    const getDevices = async () => {
-      try {
-        // Solicita permissão primeiro para conseguir listar os nomes dos dispositivos
-        await navigator.mediaDevices.getUserMedia({ video: true });
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const cameras = devices.filter(device => device.kind === 'videoinput');
-        setVideoDevices(cameras);
-        if (cameras.length > 0) {
-          // Não seta o ID aqui para deixar o startWebcam escolher o padrão inicialmente
-        }
-      } catch (e) {
-        console.error("Erro ao listar dispositivos:", e);
-      }
-    };
-
-    loadModels();
-    getDevices();
-    startWebcam(); // Inicia com a câmera padrão
-
-    return () => {
-      if (requestRef.current) cancelAnimationFrame(requestRef.current);
-      if (predictTimeoutRef.current) clearTimeout(predictTimeoutRef.current);
-
-      // Cleanup: Stop video tracks
-      if (videoRef.current && videoRef.current.srcObject) {
-        const tracks = videoRef.current.srcObject.getTracks();
-        tracks.forEach(track => track.stop());
-      }
-    };
-  }, []);
+    } catch (e) {
+      console.error("Erro ao listar dispositivos:", e);
+    }
+  };
 
   const startWebcam = async (deviceId = null) => {
     try {
-      // Cancel previous loop if running
-      if (requestRef.current) {
-        cancelAnimationFrame(requestRef.current);
-      }
+      setLoadingError(null);
 
       // Parar stream anterior se existir
       if (videoRef.current && videoRef.current.srcObject) {
@@ -198,10 +236,61 @@ const App = () => {
         }
       }
     } catch (err) {
-      setLoadingError("Sem acesso à câmera.");
-      console.error(err);
+      console.error("ERRO FATAL NA CÂMERA:", err);
+      if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setLoadingError("Nenhuma câmera encontrada. Verifique a conexão e as permissões.");
+      } else if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setLoadingError("Permissão de câmera negada. Habilite nas configurações do navegador.");
+      } else {
+        setLoadingError(`Erro na câmera: ${err.message || "Desconhecido"}`);
+      }
+      setIsCameraReady(false);
     }
   };
+
+  useEffect(() => {
+    const init = async () => {
+      try {
+        // 1. Carregar IA
+        window.tf = tf;
+        await tf.setBackend('webgl').catch(() => console.log("WebGL não disponível, usando CPU"));
+        await tf.ready();
+        setBackend(tf.getBackend());
+
+        await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet');
+        await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/knn-classifier');
+
+        await new Promise(r => setTimeout(r, 500));
+
+        if (window.knnClassifier && window.mobilenet) {
+          classifier.current = window.knnClassifier.create();
+          console.log("Carregando MobileNet V2...");
+          mobilenetModel.current = await window.mobilenet.load({ version: 2, alpha: 1.0 });
+          setIsModelLoading(false);
+        } else {
+          throw new Error('Err: Bibliotecas de IA falharam.');
+        }
+
+        // 2. Iniciar Câmera (Isso pede permissão)
+        await startWebcam();
+
+        // 3. Listar dispositivos (Só depois de ter permissão)
+        await getDevices();
+
+      } catch (error) {
+        console.error(error);
+        setLoadingError("Erro ao inicializar sistema. " + error.message);
+        setIsModelLoading(false);
+      }
+    };
+
+    init();
+
+    return () => {
+      if (requestRef.current) cancelAnimationFrame(requestRef.current);
+      if (predictRef.current) cancelAnimationFrame(predictRef.current);
+    };
+  }, []);
 
   const handleCameraChange = (e) => {
     const newDeviceId = e.target.value;
@@ -209,22 +298,33 @@ const App = () => {
     startWebcam(newDeviceId);
   };
 
+  const handleRetryCamera = () => {
+    setLoadingError(null);
+    startWebcam();
+  };
+
   // --- Lógica de Regiões ---
   const addRegion = () => {
     const newId = Date.now().toString();
     const newRegion = {
       id: newId,
-      name: `Item ${regions.length + 1}`,
-      box: { x: 50, y: 50, w: 100, h: 100 },
+      name: `Objeto ${regions.length + 1}`,
+      box: { x: 50, y: 50, w: 150, h: 150 },
       samples: 0, status: null, confidence: 0
     };
-    setRegions(prev => [...prev, newRegion]);
+    setRegions(prev => {
+      const updated = [...prev, newRegion];
+      if (selectedModel && modelsData.current[selectedModel]) {
+        modelsData.current[selectedModel].regions = updated.map(r => ({ ...r, box: { ...r.box } }));
+      }
+      return updated;
+    });
     setActiveRegionId(newId);
+    if (selectedModel) saveModelToLocal(selectedModel);
   };
 
   const removeRegion = (id) => {
     if (regions.length <= 1) return;
-
     let nextActiveId = activeRegionId;
     if (activeRegionId === id) {
       const remaining = regions.filter(r => r.id !== id);
@@ -232,11 +332,26 @@ const App = () => {
         nextActiveId = remaining[0].id;
       }
     }
-
-    setRegions(prev => prev.filter(r => r.id !== id));
+    setRegions(prev => {
+      const updated = prev.filter(r => r.id !== id);
+      if (selectedModel && modelsData.current[selectedModel]) {
+        modelsData.current[selectedModel].regions = updated.map(r => ({ ...r, box: { ...r.box } }));
+      }
+      return updated;
+    });
     if (nextActiveId !== activeRegionId) {
       setActiveRegionId(nextActiveId);
     }
+    if (selectedModel) saveModelToLocal(selectedModel);
+  };
+
+  const clearRegionSamples = (regionId) => {
+    if (!classifier.current) return;
+    try {
+      classifier.current.clearClass(getClassLabel(regionId));
+    } catch (_) { }
+    setRegions(prev => prev.map(r => r.id === regionId ? { ...r, samples: 0, status: null, confidence: 0 } : r));
+    if (selectedModel) saveModelToLocal(selectedModel);
   };
 
   // --- IA Core ---
@@ -245,35 +360,30 @@ const App = () => {
     const video = videoRef.current;
     if (video.readyState !== 4) return null;
 
-    const img = tf.browser.fromPixels(video);
-    const scaleX = video.videoWidth / video.clientWidth;
-    const scaleY = video.videoHeight / video.clientHeight;
+    return tf.tidy(() => {
+      const img = tf.browser.fromPixels(video);
+      const scaleX = video.videoWidth / video.clientWidth;
+      const scaleY = video.videoHeight / video.clientHeight;
 
-    let startX = Math.floor(box.x * scaleX);
-    let startY = Math.floor(box.y * scaleY);
-    let width = Math.floor(box.w * scaleX);
-    let height = Math.floor(box.h * scaleY);
+      let startX = Math.floor(box.x * scaleX);
+      let startY = Math.floor(box.y * scaleY);
+      let width = Math.floor(box.w * scaleX);
+      let height = Math.floor(box.h * scaleY);
 
-    startX = Math.max(0, startX);
-    startY = Math.max(0, startY);
-    if (startX + width > video.videoWidth) width = video.videoWidth - startX;
-    if (startY + height > video.videoHeight) height = video.videoHeight - startY;
+      startX = Math.max(0, startX);
+      startY = Math.max(0, startY);
+      if (startX + width > video.videoWidth) width = video.videoWidth - startX;
+      if (startY + height > video.videoHeight) height = video.videoHeight - startY;
 
-    if (width <= 0 || height <= 0) {
-      img.dispose();
-      return null;
-    }
+      if (width <= 0 || height <= 0) return null;
 
-    try {
-      const crop = img.slice([startY, startX, 0], [height, width, 3]);
-      const activation = mobilenetModel.current.infer(crop, true);
-      img.dispose();
-      crop.dispose();
-      return activation;
-    } catch (e) {
-      img.dispose();
-      return null;
-    }
+      try {
+        const crop = img.slice([startY, startX, 0], [height, width, 3]);
+        return mobilenetModel.current.infer(crop, true);
+      } catch (e) {
+        return null;
+      }
+    });
   };
 
   // Helper para converter Base64 para Uint8Array (para upload bytea)
@@ -428,14 +538,7 @@ const App = () => {
   const addObjectExample = async (e) => {
     if (e) e.stopPropagation();
 
-    if (isPredicting) {
-      console.warn("Cannot add example while predicting");
-      return;
-    }
-    if (!classifier.current) {
-      console.error("Classifier not initialized");
-      return;
-    }
+    if (isPredicting || !classifier.current) return;
 
     const activeRegion = regions.find(r => r.id === activeRegionId);
     if (!activeRegion) {
@@ -452,32 +555,12 @@ const App = () => {
 
     const activation = getCropTensor(activeRegion.box);
     if (activation) {
-      classifier.current.addExample(activation, activeRegion.id);
+      classifier.current.addExample(activation, getClassLabel(activeRegion.id));
       activation.dispose();
-
-      // Salvar no Supabase (Nova Schema)
-      const base64 = captureCropBase64(activeRegion.box);
-      if (base64) {
-        const tableName = currentModel.toLowerCase();
-
-        // Insert into 'polo' or 'tera'
-        supabase.from(tableName).insert({
-          file_name: activeRegion.id, // Usando ID da região como nome do arquivo/label
-          url: base64, // Salvando o Data URI inteiro na coluna URL
-          // metadata: { region_name: activeRegion.name } // Opcional se quiser salvar mais dados
-        }).then(({ error }) => {
-          if (error) console.error(`Erro ao salvar em ${tableName}:`, error);
-          else console.log(`Salvo em ${tableName} com sucesso`);
-        });
-      } else {
-        console.error("Failed to capture crop base64");
-      }
 
       setRegions(prevRegions =>
         prevRegions.map(r => r.id === activeRegionId ? { ...r, samples: r.samples + 1 } : r)
       );
-    } else {
-      console.error("Failed to get crop tensor");
     }
   };
 
@@ -492,34 +575,13 @@ const App = () => {
         successCount++;
       }
     }
-    if (successCount > 0) {
-      setBackgroundSamples(prev => prev + 1);
-
-      // Salvar Background (Nova Schema)
-      const regionToSave = regions.find(r => r.id === activeRegionId) || regions[0];
-      if (regionToSave) {
-        const base64 = captureCropBase64(regionToSave.box);
-        if (base64) {
-          supabase.from('fotofundo').insert({
-            file_name: `bg_${Date.now()}`,
-            url: base64,
-            is_background: true
-          }).then(({ error }) => {
-            if (error) console.error('Erro ao salvar fundo:', error);
-            else console.log('Fundo salvo com sucesso');
-          });
-        }
-      }
-    }
+    if (successCount > 0) setBackgroundSamples(prev => prev + 1);
   };
 
   const predictAllRegions = async () => {
     if (!classifier.current || classifier.current.getNumClasses() === 0) return;
 
-    // FIX: Use regionsRef.current to avoid stale closure in the loop
-    const currentRegions = regionsRef.current;
-
-    const updatedRegions = await Promise.all(currentRegions.map(async (region) => {
+    const updatedRegions = await Promise.all(regions.map(async (region) => {
       if (region.samples === 0 && backgroundSamples === 0) return { ...region, status: null, confidence: 0 };
 
       const activation = getCropTensor(region.box);
@@ -527,6 +589,7 @@ const App = () => {
 
       let resultStatus = 'bad';
       let conf = 0;
+      const label = getClassLabel(region.id);
 
       try {
         const result = await classifier.current.predictClass(activation);
@@ -569,7 +632,7 @@ const App = () => {
       if (predictTimeoutRef.current) clearTimeout(predictTimeoutRef.current);
       setRegions(prev => prev.map(r => ({ ...r, status: null, confidence: 0 })));
     }
-    return () => { isMounted = false; };
+    return () => { if (predictRef.current) cancelAnimationFrame(predictRef.current); };
   }, [isPredicting, currentBarcode, threshold]);
 
   const saveToHistory = () => {
@@ -606,9 +669,9 @@ const App = () => {
   const handleMouseDown = (e) => {
     if (viewMode === 'operator') return;
     const rect = canvasRef.current.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-    const HANDLE_SIZE = 20;
+    const inputX = coords.clientX - rect.left;
+    const inputY = coords.clientY - rect.top;
+    const HANDLE_SIZE = 30;
 
     const reversedRegions = [...regions].reverse();
     for (const region of reversedRegions) {
@@ -619,24 +682,28 @@ const App = () => {
         if (mouseX > x + w - HANDLE_SIZE && mouseX < x + w + HANDLE_SIZE &&
           mouseY > y + h - HANDLE_SIZE && mouseY < y + h + HANDLE_SIZE) {
           setInteractionMode('resizing');
-          setDragStart({ x: mouseX, y: mouseY });
-          break;
+          setDragStart({ x: inputX, y: inputY });
+          return;
         }
       }
-      if (mouseX > x && mouseX < x + w && mouseY > y && mouseY < y + h) {
+      if (inputX > x && inputX < x + w && inputY > y && inputY < y + h) {
         setActiveRegionId(region.id);
         setInteractionMode('dragging');
-        setDragStart({ x: mouseX - x, y: mouseY - y });
-        break;
+        setDragStart({ x: inputX - x, y: inputY - y });
+        return;
       }
     }
   };
 
-  const handleMouseMove = (e) => {
+  const handleInputMove = (e) => {
     if (interactionMode === 'none' || viewMode === 'operator') return;
+    if (e.cancelable) e.preventDefault();
+
+    const coords = getClientCoordinates(e);
     const rect = canvasRef.current.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
+    const inputX = coords.clientX - rect.left;
+    const inputY = coords.clientY - rect.top;
+
     const activeIndex = regions.findIndex(r => r.id === activeRegionId);
     if (activeIndex === -1) return;
 
@@ -644,11 +711,11 @@ const App = () => {
     let newBox = { ...currentRegion.box };
 
     if (interactionMode === 'dragging') {
-      newBox.x = Math.max(0, Math.min(canvasRef.current.width - newBox.w, mouseX - dragStart.x));
-      newBox.y = Math.max(0, Math.min(canvasRef.current.height - newBox.h, mouseY - dragStart.y));
+      newBox.x = Math.max(0, Math.min(canvasRef.current.width - newBox.w, inputX - dragStart.x));
+      newBox.y = Math.max(0, Math.min(canvasRef.current.height - newBox.h, inputY - dragStart.y));
     } else if (interactionMode === 'resizing') {
-      const newWidth = Math.max(20, mouseX - newBox.x);
-      const newHeight = Math.max(20, mouseY - newBox.y);
+      const newWidth = Math.max(40, inputX - newBox.x);
+      const newHeight = Math.max(40, inputY - newBox.y);
       newBox.w = Math.min(newWidth, canvasRef.current.width - newBox.x);
       newBox.h = Math.min(newHeight, canvasRef.current.height - newBox.y);
     }
@@ -659,7 +726,7 @@ const App = () => {
     });
   };
 
-  const handleMouseUp = () => setInteractionMode('none');
+  const handleInputEnd = () => setInteractionMode('none');
 
   // --- Loop Visual ---
   const loop = () => {
@@ -668,7 +735,9 @@ const App = () => {
       return;
     }
     const ctx = canvasRef.current.getContext('2d');
-    if (canvasRef.current.width !== videoRef.current.clientWidth) {
+
+    if (canvasRef.current.width !== videoRef.current.clientWidth ||
+      canvasRef.current.height !== videoRef.current.clientHeight) {
       canvasRef.current.width = videoRef.current.clientWidth;
       canvasRef.current.height = videoRef.current.clientHeight;
     }
@@ -713,7 +782,7 @@ const App = () => {
       if (viewMode === 'setup' && isActive) {
         ctx.fillStyle = '#fbbf24';
         ctx.beginPath();
-        ctx.arc(x + w, y + h, 5, 0, 2 * Math.PI);
+        ctx.arc(x + w, y + h, 8, 0, 2 * Math.PI);
         ctx.fill();
       }
     });
@@ -722,6 +791,118 @@ const App = () => {
 
   const activeRegion = regions.find(r => r.id === activeRegionId);
   const isUnbalanced = activeRegion && (activeRegion.samples > backgroundSamples * 2 || backgroundSamples > activeRegion.samples * 2) && backgroundSamples > 0;
+  const hasPhotos = (classifier.current && classifier.current.getNumClasses() > 0) || regions.some(r => r.samples > 0) || backgroundSamples > 0 || history.length > 0;
+
+  const handleDeleteAllPhotos = async () => {
+    if (isPredicting) {
+      setActionMessage('Pare a validação antes de apagar');
+      setActionMessageType('error');
+      return;
+    }
+    if (!hasPhotos || isDeleting) return;
+    const ok = window.confirm('Confirma apagar todas as fotos? Essa ação é permanente.');
+    if (!ok) return;
+    setIsDeleting(true);
+    setActionMessage(null);
+    try {
+      try {
+        localStorage.setItem('__write_test', '1');
+        localStorage.removeItem('__write_test');
+      } catch (e) {
+        setActionMessage('Sem permissão para escrever no armazenamento local');
+        setActionMessageType('error');
+        setIsDeleting(false);
+        return;
+      }
+
+      Object.keys(modelsData.current).forEach(name => {
+        try { localStorage.removeItem(`modelData:${name}`); } catch (_) { }
+      });
+
+      if (classifier.current) classifier.current.clearAllClasses();
+      setRegions(prev => prev.map(r => ({ ...r, samples: 0, status: null, confidence: 0 })));
+      setBackgroundSamples(0);
+      setHistory([]);
+
+      setActionMessage('Fotos deletadas com sucesso');
+      setActionMessageType('success');
+
+      const totalSamples = regions.reduce((acc, r) => acc + r.samples, 0) + backgroundSamples;
+      setAuditLogs(prev => [{ id: Date.now(), type: 'DELETE_ALL_PHOTOS', model: selectedModel, timestamp: new Date().toISOString(), totalSamples }, ...prev]);
+    } catch (err) {
+      setActionMessage('Erro ao deletar fotos');
+      setActionMessageType('error');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleModelSelect = (modelName) => {
+    isSwitchingRef.current = true;
+    if (selectedModel) saveModelToLocal(selectedModel);
+    setSelectedModel(modelName);
+    const stored = loadModelFromLocal(modelName);
+    if (classifier.current) {
+      classifier.current.clearAllClasses();
+      if (stored && stored.dataset) {
+        const ds = deserializeDataset(stored.dataset);
+        if (ds) classifier.current.setClassifierDataset(ds);
+      } else {
+        const nextData = modelsData.current[modelName];
+        if (nextData && nextData.dataset) {
+          classifier.current.setClassifierDataset(nextData.dataset);
+        }
+      }
+    }
+    const sourceRegions = (stored && stored.regions) ? stored.regions : modelsData.current[modelName].regions;
+    const newRegions = (sourceRegions || []).map(r => ({
+      id: r.id,
+      name: r.name,
+      box: { ...r.box },
+      samples: r.samples || 0,
+      status: null,
+      confidence: 0
+    }));
+    setRegions(newRegions);
+    if (newRegions.length > 0) setActiveRegionId(newRegions[0].id);
+    setBackgroundSamples((stored && stored.backgroundSamples != null) ? stored.backgroundSamples : (modelsData.current[modelName].backgroundSamples || 0));
+    setViewMode('setup');
+    setIsPredicting(false);
+    setCurrentBarcode('');
+    setTimeout(() => { isSwitchingRef.current = false; }, 0);
+  };
+
+  if (!selectedModel) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-white font-sans flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl p-8 text-center">
+          <div className="bg-blue-500/10 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-6">
+            <Car size={32} className="text-blue-500" />
+          </div>
+          <h1 className="text-2xl font-bold mb-2">Selecione o Modelo</h1>
+          <p className="text-slate-400 mb-8">Escolha o veículo para carregar as configurações de inspeção.</p>
+
+          <div className="space-y-3">
+            <button
+              onClick={() => handleModelSelect('Polo Track')}
+              className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-blue-500/50 p-4 rounded-xl flex items-center justify-between group transition-all"
+            >
+              <span className="font-bold text-lg group-hover:text-blue-400 transition-colors">Polo Track</span>
+              <ArrowRight size={20} className="text-slate-600 group-hover:text-blue-500" />
+            </button>
+
+            <button
+              onClick={() => handleModelSelect('Tera')}
+              className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-blue-500/50 p-4 rounded-xl flex items-center justify-between group transition-all"
+            >
+              <span className="font-bold text-lg group-hover:text-blue-400 transition-colors">Tera</span>
+              <ArrowRight size={20} className="text-slate-600 group-hover:text-blue-500" />
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-white font-sans flex flex-col h-screen overflow-hidden">
@@ -751,10 +932,10 @@ const App = () => {
         </div>
       </header>
 
-      <div className="flex flex-1 overflow-hidden flex-col lg:flex-row">
+      <div className="flex flex-1 overflow-hidden">
 
         {/* Câmera Area */}
-        <div className="relative bg-black flex items-center justify-center overflow-hidden p-4 shrink-0 h-1/2 lg:h-full lg:flex-1">
+        <div className="flex-1 relative bg-black flex items-center justify-center overflow-hidden p-4">
           <div className="relative w-full h-full max-w-5xl aspect-video rounded-lg overflow-hidden border border-slate-800 shadow-2xl">
             <video ref={videoRef} className="absolute w-full h-full object-contain opacity-70" muted playsInline />
             <canvas
@@ -810,7 +991,7 @@ const App = () => {
         </div>
 
         {/* Sidebar */}
-        <div className="w-full lg:w-80 bg-slate-900 border-t lg:border-t-0 lg:border-l border-slate-800 flex flex-col z-40 h-1/2 lg:h-full">
+        <div className="w-80 bg-slate-900 border-l border-slate-800 flex flex-col z-40">
 
           {/* MODO SETUP */}
           {viewMode === 'setup' && (
@@ -819,27 +1000,6 @@ const App = () => {
                 <h2 className="font-bold text-slate-200 flex items-center gap-2 mb-4">
                   <Settings size={18} /> Configuração
                 </h2>
-
-                {/* Seletor de Modelo */}
-                <div className="bg-slate-800 p-3 rounded-lg mb-3">
-                  <label className="text-xs text-slate-400 block mb-1 flex items-center gap-1">
-                    <Car size={12} /> Modelo do Veículo
-                  </label>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setCurrentModel('Polo')}
-                      className={`flex-1 py-1.5 text-xs font-bold rounded transition-colors ${currentModel === 'Polo' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}
-                    >
-                      POLO
-                    </button>
-                    <button
-                      onClick={() => setCurrentModel('Tera')}
-                      className={`flex-1 py-1.5 text-xs font-bold rounded transition-colors ${currentModel === 'Tera' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}
-                    >
-                      TERA
-                    </button>
-                  </div>
-                </div>
 
                 {/* Seletor de Câmera */}
                 <div className="bg-slate-800 p-3 rounded-lg mb-3">
@@ -1005,8 +1165,8 @@ const App = () => {
               </div>
             </div>
           )}
-
         </div>
+
       </div>
     </div>
   );
