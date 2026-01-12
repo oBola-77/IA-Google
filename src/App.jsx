@@ -419,7 +419,7 @@ const App = () => {
   // Carregar dados do Supabase
   useEffect(() => {
     const loadSupabaseData = async () => {
-      if (!classifier.current || !mobilenetModel.current || !selectedModel) return;
+      if (!classifier.current || !mobilenetModel.current || !currentModel) return;
 
       // setIsModelLoading(true); // Removido pois o state não existe mais
       // classifier.current.clearAllClasses(); // Removido para não limpar dados locais carregados
@@ -427,7 +427,7 @@ const App = () => {
       try {
         // 1. Carregar Exemplos do Modelo (Polo ou Tera)
         // Mapear nome do modelo para nome da tabela
-        let tableName = selectedModel.toLowerCase();
+        let tableName = currentModel.toLowerCase();
         if (tableName.includes('polo')) tableName = 'polo';
         if (tableName.includes('tera')) tableName = 'tera';
 
@@ -512,7 +512,7 @@ const App = () => {
     };
 
     loadSupabaseData();
-  }, [selectedModel]); // Dependência corrigida
+  }, [currentModel]);
 
   const captureCropBase64 = (box) => {
     if (!videoRef.current) return null;
