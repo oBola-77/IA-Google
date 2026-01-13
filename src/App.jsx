@@ -564,8 +564,8 @@ const App = () => {
       // Upload para Supabase
       try {
         const imageBase64 = captureCropBase64(activeRegion.box);
-        if (imageBase64 && currentModel) {
-          const tableName = currentModel.toLowerCase().includes('polo') ? 'polo' : 'tera';
+        if (imageBase64 && selectedModel) {
+          const tableName = selectedModel.toLowerCase().includes('polo') ? 'polo' : 'tera';
           const { error } = await supabase
             .from(tableName)
             .insert({
@@ -576,7 +576,7 @@ const App = () => {
           if (error) {
             console.error('Erro ao salvar no Supabase:', error);
           } else {
-            console.log('Imagem salva no Supabase com sucesso!');
+            console.log(`Imagem salva no Supabase (${tableName}) com sucesso!`);
           }
         }
       } catch (err) {
