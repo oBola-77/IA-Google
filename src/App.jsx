@@ -560,18 +560,60 @@ const App = () => {
       setRegions(prevRegions =>
         prevRegions.map(r => r.id === activeRegionId ? { ...r, samples: r.samples + 1 } : r)
       );
+
+      // Upload para Supabase
+      try {
+        const imageBase64 = captureCropBase64(activeRegion.box);
+        if (imageBase64 && currentModel) {
+          const tableName = currentModel.toLowerCase().includes('polo') ? 'polo' : 'tera';
+          const { error } = await supabase
+            .from(tableName)
+            .insert({
+              file_name: activeRegion.id,
+              url: imageBase64
+            });
+
+          if (error) {
+            console.error('Erro ao salvar no Supabase:', error);
+          } else {
+            console.log('Imagem salva no Supabase com sucesso!');
+          }
+        }
+      } catch (err) {
+        console.error('Erro no upload:', err);
+      }
     }
   };
 
   const addBackgroundExample = async () => {
     if (isPredicting || !classifier.current) return;
     let successCount = 0;
+
     for (const region of regions) {
       const activation = getCropTensor(region.box);
       if (activation) {
         classifier.current.addExample(activation, 'background');
         activation.dispose();
         successCount++;
+
+        // Upload para Supabase
+        try {
+          const imageBase64 = captureCropBase64(region.box);
+          if (imageBase64) {
+            const { error } = await supabase
+              .from('fotofundo')
+              .insert({
+                file_name: `bg_${Date.now()}`,
+                url: imageBase64
+              });
+
+            if (error) {
+              console.error('Erro ao salvar fundo no Supabase:', error);
+            }
+          }
+        } catch (err) {
+          console.error('Erro no upload de fundo:', err);
+        }
       }
     }
     if (successCount > 0) setBackgroundSamples(prev => prev + 1);
@@ -1056,6 +1098,21 @@ const App = () => {
                       </option>
                     ))}
                     {videoDevices.length === 0 && <option>Nenhuma câmera detectada</option>}
+                  </select>
+                </div>
+
+                {/* Seletor de Modelo de Carro */}
+                <div className="bg-slate-800 p-3 rounded-lg mb-3">
+                  <label className="text-xs text-slate-400 block mb-1 flex items-center gap-1">
+                    <Car size={12} /> Modelo do Carro
+                  </label>
+                  <select
+                    className="w-full bg-slate-700 text-white text-xs rounded p-2 border border-slate-600 outline-none"
+                    value={selectedModel || ''}
+                    onChange={(e) => handleModelSelect(e.target.value)}
+                  >
+                    <option value="Polo Track">Polo Track</option>
+                    <option value="Tera">Tera</option>
                   </select>
                 </div>
 
