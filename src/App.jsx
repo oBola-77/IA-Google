@@ -657,6 +657,73 @@ const App = () => {
     setRegions(updatedRegions);
   };
 
+  // --- Excluir Todas as Fotos ---
+  const handleDeleteAllPhotos = async () => {
+    const confirmDelete = window.confirm(
+      '⚠️ ATENÇÃO: Isso vai excluir TODAS as fotos do modelo atual do banco de dados e resetar o treinamento local. Tem certeza?'
+    );
+
+    if (!confirmDelete) return;
+
+    try {
+      setActionMessage('Excluindo fotos...');
+      setActionMessageType('warning');
+
+      // 1. Excluir do Supabase
+      if (currentModel) {
+        const tableName = currentModel.toLowerCase().includes('polo') ? 'polo' : 'tera';
+
+        // Excluir todas as linhas da tabela do modelo atual
+        const { error: modelError } = await supabase
+          .from(tableName)
+          .delete()
+          .neq('id', 0); // Delete all rows (workaround: delete where id != 0 deletes everything)
+
+        if (modelError) {
+          console.error('Erro ao excluir fotos do modelo:', modelError);
+        }
+
+        // Excluir fotos de fundo
+        const { error: bgError } = await supabase
+          .from('fotofundo')
+          .delete()
+          .neq('id', 0);
+
+        if (bgError) {
+          console.error('Erro ao excluir fotos de fundo:', bgError);
+        }
+      }
+
+      // 2. Limpar classificador local
+      if (classifier.current) {
+        classifier.current.clearAllClasses();
+      }
+
+      // 3. Resetar estado local
+      setRegions(prev => prev.map(r => ({ ...r, samples: 0, status: null, confidence: 0 })));
+      setBackgroundSamples(0);
+
+      // 4. Limpar localStorage
+      if (selectedModel) {
+        localStorage.removeItem(`model_${selectedModel}`);
+        if (modelsData.current[selectedModel]) {
+          modelsData.current[selectedModel].dataset = null;
+          modelsData.current[selectedModel].backgroundSamples = 0;
+        }
+      }
+
+      setActionMessage('✅ Todas as fotos foram excluídas!');
+      setActionMessageType('success');
+      setTimeout(() => setActionMessage(null), 3000);
+
+    } catch (err) {
+      console.error('Erro ao excluir fotos:', err);
+      setActionMessage('❌ Erro ao excluir fotos');
+      setActionMessageType('error');
+      setTimeout(() => setActionMessage(null), 3000);
+    }
+  };
+
   // --- Loop de Predição ---
   useEffect(() => {
     let isMounted = true;
@@ -773,49 +840,6 @@ const App = () => {
   const isUnbalanced = activeRegion && (activeRegion.samples > backgroundSamples * 2 || backgroundSamples > activeRegion.samples * 2) && backgroundSamples > 0;
   const hasPhotos = (classifier.current && classifier.current.getNumClasses() > 0) || regions.some(r => r.samples > 0) || backgroundSamples > 0 || history.length > 0;
 
-  const handleDeleteAllPhotos = async () => {
-    if (isPredicting) {
-      setActionMessage('Pare a validação antes de apagar');
-      setActionMessageType('error');
-      return;
-    }
-    if (!hasPhotos || isDeleting) return;
-    const ok = window.confirm('Confirma apagar todas as fotos? Essa ação é permanente.');
-    if (!ok) return;
-    setIsDeleting(true);
-    setActionMessage(null);
-    try {
-      try {
-        localStorage.setItem('__write_test', '1');
-        localStorage.removeItem('__write_test');
-      } catch (e) {
-        setActionMessage('Sem permissão para escrever no armazenamento local');
-        setActionMessageType('error');
-        setIsDeleting(false);
-        return;
-      }
-
-      Object.keys(modelsData.current).forEach(name => {
-        try { localStorage.removeItem(`modelData:${name}`); } catch (_) { }
-      });
-
-      if (classifier.current) classifier.current.clearAllClasses();
-      setRegions(prev => prev.map(r => ({ ...r, samples: 0, status: null, confidence: 0 })));
-      setBackgroundSamples(0);
-      setHistory([]);
-
-      setActionMessage('Fotos deletadas com sucesso');
-      setActionMessageType('success');
-
-      const totalSamples = regions.reduce((acc, r) => acc + r.samples, 0) + backgroundSamples;
-      setAuditLogs(prev => [{ id: Date.now(), type: 'DELETE_ALL_PHOTOS', model: selectedModel, timestamp: new Date().toISOString(), totalSamples }, ...prev]);
-    } catch (err) {
-      setActionMessage('Erro ao deletar fotos');
-      setActionMessageType('error');
-    } finally {
-      setIsDeleting(false);
-    }
-  };
 
   const handleModelSelect = (modelName) => {
     isSwitchingRef.current = true;
@@ -1181,6 +1205,14 @@ const App = () => {
                     <Eraser size={16} /> GRAVAR FUNDO
                   </div>
                   <span className="text-xs font-mono">{backgroundSamples} amostras</span>
+                </button>
+
+                {/* Botão de Exclusão de Emergência */}
+                <button
+                  onClick={handleDeleteAllPhotos}
+                  className="w-full mt-3 py-2 bg-red-600/10 hover:bg-red-600/20 border border-red-600/30 text-red-500 rounded flex justify-center items-center gap-2 text-xs font-bold active:scale-95 transition-transform"
+                >
+                  <Trash2 size={14} /> EXCLUIR TODAS AS FOTOS
                 </button>
               </div>
             </div>
