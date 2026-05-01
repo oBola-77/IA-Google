@@ -1,12 +1,14 @@
 import React, { useState, useRef, useEffect } from 'react';
 import * as tf from '@tensorflow/tfjs';
 import {
-  BoxSelect, Trash2, Plus,
+  BoxSelect, Trash2, Plus, Pencil,
   Check, X, Layout, Eraser,
   Lock, Unlock, Settings, Save, Database, AlertTriangle, Eye,
   ScanBarcode, ArrowRight, Camera, Car
 } from 'lucide-react';
-import { supabase } from './supabaseClient';
+import { saveImage, getImagesByModel, deleteImagesByModel, clearAllImages, updateModelName, bulkInsertImages, deleteImagesByLabel } from './db';
+import { supabase } from './supabase';
+import InspectionHistory from './InspectionHistory';
 
 const App = () => {
   // --- Refs ---
@@ -52,28 +54,178 @@ const App = () => {
   const [history, setHistory] = useState([]);
   const [, setAuditLogs] = useState([]);
 
+  // Fetch initial history from Supabase
+  useEffect(() => {
+    const fetchHistory = async () => {
+      const { data, error } = await supabase
+        .from('inspections')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(10);
+
+      if (data) {
+        const formattedHistory = data.map(item => ({
+          id: item.id,
+          code: item.barcode,
+          timestamp: new Date(item.created_at).toLocaleString(),
+          status: item.status,
+          image: item.image_url,
+          details: Array.isArray(item.details)
+            ? item.details.map(d => `${d.name}: ${d.status === 'ok' ? 'OK' : 'FALHA'}`).join(', ')
+            : 'Detalhes indisponíveis'
+        }));
+        setHistory(formattedHistory);
+      }
+    };
+    fetchHistory();
+  }, []);
+
   // Interação
   const [interactionMode, setInteractionMode] = useState('none');
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const dragStartRef = useRef({ x: 0, y: 0 });
   const [isDeleting, setIsDeleting] = useState(false);
   const [actionMessage, setActionMessage] = useState(null);
   const [actionMessageType, setActionMessageType] = useState('success');
 
+  // History Modal
+  const [showHistory, setShowHistory] = useState(false);
+
   // --- Car Model Logic ---
-  const [selectedModel, setSelectedModel] = useState(null); // 'Polo Track' | 'Tera'
-  const modelsData = useRef({
-    'Polo Track': {
-      regions: [{ id: '1', name: 'Objeto 1 (Polo)', box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }],
-      dataset: null,
-      backgroundSamples: 0
-    },
-    'Tera': {
-      regions: [{ id: '1', name: 'Objeto 1 (Tera)', box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }],
-      dataset: null,
-      backgroundSamples: 0
+  const [selectedModel, setSelectedModel] = useState(null);
+  // Store full model objects: {id, name, config}
+  const [availableModels, setAvailableModels] = useState([]);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncStatus, setSyncStatus] = useState('');
+
+  // Fetch models from Supabase on load
+  useEffect(() => {
+    fetchModels();
+  }, []);
+
+  const fetchModels = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('models')
+        .select('*')
+        .order('name');
+      if (error) throw error;
+      setAvailableModels(data || []);
+    } catch (e) {
+      console.error("Erro ao buscar modelos:", e);
     }
-  });
+  };
+
+  const modelsData = useRef({});
   const isSwitchingRef = useRef(false);
+
+  // Helper to get current model ID
+  const getCurrentModelId = () => {
+    const found = availableModels.find(m => m.name === selectedModel);
+    return found ? found.id : null;
+  };
+
+  const handleAddModel = async () => {
+    const name = window.prompt("Nome do novo modelo:");
+    if (!name || name.trim() === "") return;
+
+    if (availableModels.some(m => m.name === name)) {
+      alert("Modelo já existe!");
+      return;
+    }
+
+    try {
+      const { error } = await supabase
+        .from('models')
+        .insert([{
+          name,
+          config: {
+            regions: [{ id: '1', name: `Objeto 1 (${name})`, box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }],
+            backgroundSamples: 0
+          }
+        }]);
+
+      if (error) throw error;
+
+      await fetchModels();
+      // Optionally switch to it immediately - but requires full sync flow
+      handleStartScreenModelSelect(name);
+    } catch (e) {
+      console.error("Erro ao criar modelo:", e);
+      alert("Erro ao criar modelo.");
+    }
+  };
+
+  const handleEditModel = async () => {
+    if (!selectedModel) return;
+    const modelId = getCurrentModelId();
+    if (!modelId) return;
+
+    const newName = window.prompt("Novo nome para o modelo:", selectedModel);
+    if (!newName || newName.trim() === "" || newName === selectedModel) return;
+
+    if (availableModels.some(m => m.name === newName)) {
+      alert("Já existe um modelo com este nome!");
+      return;
+    }
+
+    try {
+      // Update in Supabase
+      const { error } = await supabase
+        .from('models')
+        .update({ name: newName })
+        .eq('id', modelId);
+
+      if (error) throw error;
+
+      // Update Local State lists
+      setAvailableModels(prev => prev.map(m => m.id === modelId ? { ...m, name: newName } : m));
+
+      // Update Internal Refs if loaded
+      if (modelsData.current[selectedModel]) {
+        modelsData.current[newName] = modelsData.current[selectedModel];
+        delete modelsData.current[selectedModel];
+      }
+
+      // Update Local DB (IndexedDB) for completeness, though we rely on cloud primarily now
+      await updateModelName(selectedModel, newName);
+
+      setSelectedModel(newName);
+      alert(`Modelo renomeado para "${newName}" com sucesso!`);
+    } catch (e) {
+      console.error("Erro ao renomear modelo:", e);
+      alert("Erro ao renomear modelo.");
+    }
+  };
+
+  const handleDeleteModel = async () => {
+    if (!selectedModel) return;
+    const modelId = getCurrentModelId();
+    if (!modelId) return;
+
+    if (!window.confirm(`Tem certeza que deseja EXCLUIR o modelo "${selectedModel}"? \nIsso apagará todas as configurações e imagens (Cloud e Local).`)) return;
+
+    try {
+      // Delete from Supabase (Cascade handles samples)
+      // We also need to delete bucket files. 
+      // Ideally we list them and remove, but for now we rely on table cascade.
+      // Note: Storage files remain if not handled.
+      // Let's at least delete the table row.
+      const { error } = await supabase.from('models').delete().eq('id', modelId);
+      if (error) throw error;
+
+      // Clear Local
+      await deleteImagesByModel(selectedModel);
+      if (modelsData.current[selectedModel]) delete modelsData.current[selectedModel];
+
+      await fetchModels();
+      setSelectedModel(null);
+      setViewMode('setup');
+
+      alert("Modelo excluído com sucesso.");
+    } catch (e) {
+      console.error("Erro ao excluir modelo:", e);
+    }
+  };
 
   const getClassLabel = (regionId) => (selectedModel ? `${selectedModel}::${regionId}` : String(regionId));
   const getBackgroundLabel = () => (selectedModel ? `${selectedModel}::background` : 'background');
@@ -99,18 +251,31 @@ const App = () => {
     return result;
   };
 
-  const saveModelToLocal = (modelName) => {
+  const saveModelConfig = async (modelName) => {
     if (!modelName) return;
-    let dataset = null;
-    if (classifier.current && classifier.current.getNumClasses() > 0) {
-      dataset = classifier.current.getClassifierDataset();
+
+    // Use modelsData.current which is synced in the useEffect below
+    const currentConfig = modelsData.current[modelName];
+    if (!currentConfig) return;
+
+    // 1. Update LocalStorage (Backup)
+    try {
+      localStorage.setItem(`modelData:${modelName}`, JSON.stringify(currentConfig));
+    } catch (e) {
+      console.error("Erro saving config to localStorage:", e);
     }
-    const payload = {
-      regions,
-      backgroundSamples,
-      dataset: serializeDataset(dataset)
-    };
-    try { localStorage.setItem(`modelData:${modelName}`, JSON.stringify(payload)); } catch (_) { }
+
+    // 2. Update Supabase
+    const modelId = getCurrentModelId();
+    if (modelId) {
+      try {
+        await supabase.from('models').update({
+          config: currentConfig
+        }).eq('id', modelId);
+      } catch (e) {
+        console.error("Erro saving config to cloud:", e);
+      }
+    }
   };
 
   const loadModelFromLocal = (modelName) => {
@@ -148,11 +313,9 @@ const App = () => {
   // Salvar Regiões quando mudarem e atualizar Ref
   useEffect(() => {
     regionsRef.current = regions; // Restore Ref sync for canvas loop
-    if (regions.length > 0) {
-      const key = `smartinspector_regions_${currentModel}`;
-      localStorage.setItem(key, JSON.stringify(regions));
-    }
-  }, [regions, currentModel]);
+    // REMOVIDO: localStorage.setItem(key, JSON.stringify(regions));
+    // O salvamento agora ocorre apenas no handleMouseUp para evitar travamentos
+  }, [regions]);
 
   useEffect(() => {
     if (viewMode === 'operator' && !currentBarcode && barcodeInputRef.current) {
@@ -167,7 +330,17 @@ const App = () => {
   }, [selectedModel]);
 
   useEffect(() => {
-    if (selectedModel && !isSwitchingRef.current) saveModelToLocal(selectedModel);
+    if (selectedModel && !isSwitchingRef.current) {
+      // Sync State to Ref before saving
+      if (!modelsData.current[selectedModel]) modelsData.current[selectedModel] = {};
+      const modelRef = modelsData.current[selectedModel];
+
+      // Only update if changed to avoid unnecessary cycles (though useEffect deps handle this)
+      modelRef.regions = regions;
+      modelRef.backgroundSamples = backgroundSamples;
+
+      saveModelConfig(selectedModel);
+    }
   }, [regions, backgroundSamples]);
 
   // --- Inicialização ---
@@ -320,29 +493,81 @@ const App = () => {
       return updated;
     });
     setActiveRegionId(newId);
-    if (selectedModel) saveModelToLocal(selectedModel);
+    if (selectedModel) saveModelConfig(selectedModel);
   };
 
-  const removeRegion = (id) => {
-    if (regions.length <= 1) return;
-    let nextActiveId = activeRegionId;
-    if (activeRegionId === id) {
-      const remaining = regions.filter(r => r.id !== id);
-      if (remaining.length > 0) {
+  /* --- Delete Region (Full Cleanup) --- */
+  const handleDeleteRegion = async (id) => {
+    if (regions.length <= 1) {
+      alert("Você precisa ter pelo menos 1 região.");
+      return;
+    }
+
+    if (!window.confirm("Tem certeza que deseja apagar este objeto? Todas as imagens de treinamento dele serão perdidas.")) return;
+
+    try {
+      const regionLabel = getClassLabel(id);
+      const modelId = getCurrentModelId();
+
+      // 1. Cloud Cleanup (if model exists in cloud)
+      if (modelId) {
+        // Find samples to get file paths
+        const { data: samples } = await supabase
+          .from('training_samples')
+          .select('image_path')
+          .eq('model_id', modelId)
+          .eq('label', regionLabel);
+
+        if (samples && samples.length > 0) {
+          const paths = samples.map(s => s.image_path);
+          // Delete files from bucket
+          await supabase.storage.from('training_datasets').remove(paths);
+
+          // Delete rows (Cascade won't work here because we are keeping model, just removing samples)
+          await supabase.from('training_samples')
+            .delete()
+            .eq('model_id', modelId)
+            .eq('label', regionLabel);
+        }
+      }
+
+      // 2. Local Cleanup
+      await deleteImagesByLabel(regionLabel);
+
+      // 3. Clear Classifier Class
+      if (classifier.current) {
+        try { classifier.current.clearClass(regionLabel); } catch (_) { }
+      }
+
+      // 4. Update State
+      let nextActiveId = activeRegionId;
+      if (activeRegionId === id) {
+        const remaining = regions.filter(r => r.id !== id);
         nextActiveId = remaining[0].id;
       }
-    }
-    setRegions(prev => {
-      const updated = prev.filter(r => r.id !== id);
-      if (selectedModel && modelsData.current[selectedModel]) {
-        modelsData.current[selectedModel].regions = updated.map(r => ({ ...r, box: { ...r.box } }));
+
+      setRegions(prev => {
+        const updated = prev.filter(r => r.id !== id);
+        // Updating ref for saveModelConfig
+        if (selectedModel && modelsData.current[selectedModel]) {
+          modelsData.current[selectedModel].regions = updated;
+        }
+        return updated;
+      });
+
+      if (nextActiveId !== activeRegionId) setActiveRegionId(nextActiveId);
+
+      // 5. Save Config (removes box from metadata)
+      // Wait a bit for state to settle or pass updated directly
+      // saveModelConfig reads from modelsData.current which we updated above
+      if (selectedModel) {
+        await saveModelConfig(selectedModel);
       }
-      return updated;
-    });
-    if (nextActiveId !== activeRegionId) {
-      setActiveRegionId(nextActiveId);
+
+    } catch (e) {
+      console.error("Erro ao excluir região:", e);
+      alert("Erro ao excluir região.");
     }
-    if (selectedModel) saveModelToLocal(selectedModel);
   };
 
   const clearRegionSamples = (regionId) => {
@@ -351,7 +576,7 @@ const App = () => {
       classifier.current.clearClass(getClassLabel(regionId));
     } catch (_) { }
     setRegions(prev => prev.map(r => r.id === regionId ? { ...r, samples: 0, status: null, confidence: 0 } : r));
-    if (selectedModel) saveModelToLocal(selectedModel);
+    if (selectedModel) saveModelConfig(selectedModel);
   };
 
   // --- IA Core ---
@@ -362,13 +587,12 @@ const App = () => {
 
     return tf.tidy(() => {
       const img = tf.browser.fromPixels(video);
-      const scaleX = video.videoWidth / video.clientWidth;
-      const scaleY = video.videoHeight / video.clientHeight;
+      // box is already in intrinsic video coordinates, no scaling needed based on clientWidth
 
-      let startX = Math.floor(box.x * scaleX);
-      let startY = Math.floor(box.y * scaleY);
-      let width = Math.floor(box.w * scaleX);
-      let height = Math.floor(box.h * scaleY);
+      let startX = Math.floor(box.x);
+      let startY = Math.floor(box.y);
+      let width = Math.floor(box.w);
+      let height = Math.floor(box.h);
 
       startX = Math.max(0, startX);
       startY = Math.max(0, startY);
@@ -416,38 +640,27 @@ const App = () => {
     });
   };
 
-  // Carregar dados do Supabase
+  // Carregar dados locais (IndexedDB)
   useEffect(() => {
-    const loadSupabaseData = async () => {
-      if (!classifier.current || !mobilenetModel.current || !currentModel) return;
+    const loadLocalTrainingData = async () => {
+      if (!classifier.current || !mobilenetModel.current || !selectedModel) return;
 
-      // setIsModelLoading(true); // Removido pois o state não existe mais
-      // classifier.current.clearAllClasses(); // Removido para não limpar dados locais carregados
+      classifier.current.clearAllClasses();
 
       try {
-        // 1. Carregar Exemplos do Modelo (Polo ou Tera)
-        // Mapear nome do modelo para nome da tabela
-        let tableName = currentModel.toLowerCase();
-        if (tableName.includes('polo')) tableName = 'polo';
-        if (tableName.includes('tera')) tableName = 'tera';
+        // 1. Carregar Exemplos do Modelo (incluindo background)
+        console.log(`Carregando dados locais para: ${selectedModel}`);
 
-        console.log(`Carregando dados da tabela: ${tableName}`);
+        const modelData = await getImagesByModel(selectedModel);
 
-        const { data: modelData, error: modelError } = await supabase
-          .from(tableName)
-          .select('*');
-
-        if (modelError) {
-          console.error(`Erro ao carregar ${tableName}:`, modelError);
-        } else if (modelData) {
-          console.log(`Carregado ${modelData.length} imagens de ${tableName}`);
-
-          // Count samples locally first to avoid oscillating state updates
+        if (modelData) {
+          console.log(`Carregado ${modelData.length} imagens de ${selectedModel}`);
           const sampleCounts = {};
+          let newBgSamples = 0;
 
           for (const row of modelData) {
             try {
-              const label = row.file_name;
+              const label = row.label;
               if (!row.url) continue;
 
               const img = new Image();
@@ -456,80 +669,58 @@ const App = () => {
               await new Promise((resolve) => { img.onload = resolve; });
 
               const activation = mobilenetModel.current.infer(img, true);
-              classifier.current.addExample(activation, label);
+
+              const normalizedLabel = label.toLowerCase().trim();
+
+              if (normalizedLabel === 'background') {
+                classifier.current.addExample(activation, 'background');
+                newBgSamples++;
+              } else {
+                classifier.current.addExample(activation, label);
+                // Extrai o ID da região do label
+                const regionId = label.includes('::') ? label.split('::')[1] : label;
+                sampleCounts[regionId] = (sampleCounts[regionId] || 0) + 1;
+              }
               activation.dispose();
 
-              // Increment local count
-              sampleCounts[label] = (sampleCounts[label] || 0) + 1;
             } catch (err) {
-              console.error('Erro processando imagem do modelo:', err);
+              console.error('Erro processando imagem:', err);
             }
           }
 
-          // Update state ONCE after processing all images
+          console.log(`Finalizado: ${newBgSamples} amostras de fundo carregadas.`);
+
+          // Atualizar contadores na UI
           setRegions(prev => prev.map(r => ({
             ...r,
-            samples: (r.samples || 0) + (sampleCounts[r.id] || 0) // Add to existing samples
+            samples: (sampleCounts[r.id] || 0)
           })));
-        }
-
-        // 2. Carregar Fundos (Tabela fotoFundo)
-        const { data: bgData, error: bgError } = await supabase
-          .from('fotofundo')
-          .select('*');
-
-        if (bgError) {
-          console.error('Erro ao carregar fotofundo:', bgError);
-        } else if (bgData) {
-          console.log(`Carregado ${bgData.length} imagens de fundo`);
-          let newBgSamples = 0;
-          for (const row of bgData) {
-            try {
-              if (!row.url) continue;
-
-              const img = new Image();
-              img.crossOrigin = 'anonymous';
-              img.src = row.url;
-              await new Promise((resolve) => { img.onload = resolve; });
-
-              const activation = mobilenetModel.current.infer(img, true);
-              classifier.current.addExample(activation, 'background');
-              activation.dispose();
-
-              newBgSamples++;
-            } catch (err) {
-              console.error('Erro processando imagem de fundo:', err);
-            }
-          }
-          setBackgroundSamples(prev => prev + newBgSamples);
+          setBackgroundSamples(newBgSamples);
         }
 
       } catch (e) {
         console.error('Erro geral loading:', e);
-      } finally {
-        // setIsModelLoading(false);
       }
     };
 
-    loadSupabaseData();
-  }, [currentModel]);
+    loadLocalTrainingData();
+  }, [selectedModel]);
 
   const captureCropBase64 = (box) => {
     if (!videoRef.current) return null;
     const video = videoRef.current;
-    const scaleX = video.videoWidth / video.clientWidth;
-    const scaleY = video.videoHeight / video.clientHeight;
 
+    // box coords are intrinsic video pixels. Canvas needs to match box size (intrinsic).
     const canvas = document.createElement('canvas');
-    canvas.width = box.w * scaleX;
-    canvas.height = box.h * scaleY;
+    canvas.width = box.w;
+    canvas.height = box.h;
     const ctx = canvas.getContext('2d');
 
     if (canvas.width <= 0 || canvas.height <= 0) return null;
 
     ctx.drawImage(video,
-      box.x * scaleX, box.y * scaleY, box.w * scaleX, box.h * scaleY,
-      0, 0, canvas.width, canvas.height
+      box.x, box.y, box.w, box.h, // Source (intrinsic)
+      0, 0, canvas.width, canvas.height // Dest
     );
     return canvas.toDataURL('image/jpeg', 0.8);
   };
@@ -561,26 +752,42 @@ const App = () => {
         prevRegions.map(r => r.id === activeRegionId ? { ...r, samples: r.samples + 1 } : r)
       );
 
-      // Upload para Supabase
+      // Salvar (Cloud + Local)
       try {
         const imageBase64 = captureCropBase64(activeRegion.box);
         if (imageBase64 && selectedModel) {
-          const tableName = selectedModel.toLowerCase().includes('polo') ? 'polo' : 'tera';
-          const { error } = await supabase
-            .from(tableName)
-            .insert({
-              file_name: activeRegion.id,
-              url: imageBase64
-            });
+          // 1. Local Cache (for immediate use if needed)
+          await saveImage(selectedModel, getClassLabel(activeRegion.id), imageBase64);
 
-          if (error) {
-            console.error('Erro ao salvar no Supabase:', error);
-          } else {
-            console.log(`Imagem salva no Supabase (${tableName}) com sucesso!`);
+          // 2. Cloud Upload (Background)
+          const modelId = getCurrentModelId();
+          if (modelId) {
+            // Base64 -> Blob
+            const res = await fetch(imageBase64);
+            const blob = await res.blob();
+
+            const filePath = `${modelId}/${Date.now()}.jpg`;
+
+            // Upload Image
+            const { error: uploadError } = await supabase.storage
+              .from('training_datasets')
+              .upload(filePath, blob);
+
+            if (!uploadError) {
+              // Insert Record
+              await supabase.from('training_samples').insert({
+                model_id: modelId,
+                label: getClassLabel(activeRegion.id),
+                image_path: filePath
+              });
+            } else {
+              console.error("Erro upload Supabase:", uploadError);
+            }
           }
         }
+        console.log(`Imagem salva localmente com sucesso!`);
       } catch (err) {
-        console.error('Erro no upload:', err);
+        console.error('Erro no upload local:', err);
       }
     }
   };
@@ -589,6 +796,8 @@ const App = () => {
     if (isPredicting || !classifier.current) return;
     let successCount = 0;
 
+    const modelId = getCurrentModelId();
+
     for (const region of regions) {
       const activation = getCropTensor(region.box);
       if (activation) {
@@ -596,23 +805,31 @@ const App = () => {
         activation.dispose();
         successCount++;
 
-        // Upload para Supabase
+        // Salvar 
         try {
           const imageBase64 = captureCropBase64(region.box);
           if (imageBase64) {
-            const { error } = await supabase
-              .from('fotofundo')
-              .insert({
-                file_name: `bg_${Date.now()}`,
-                url: imageBase64
-              });
+            // 1. Local
+            await saveImage(selectedModel, 'background', imageBase64);
 
-            if (error) {
-              console.error('Erro ao salvar fundo no Supabase:', error);
+            // 2. Cloud
+            if (modelId) {
+              const res = await fetch(imageBase64);
+              const blob = await res.blob();
+              const filePath = `${modelId}/bg_${Date.now()}_${region.id}.jpg`;
+
+              const { error } = await supabase.storage.from('training_datasets').upload(filePath, blob);
+              if (!error) {
+                await supabase.from('training_samples').insert({
+                  model_id: modelId,
+                  label: 'background',
+                  image_path: filePath
+                });
+              }
             }
           }
         } catch (err) {
-          console.error('Erro no upload de fundo:', err);
+          console.error('Erro no upload de fundo local:', err);
         }
       }
     }
@@ -635,15 +852,18 @@ const App = () => {
       try {
         const result = await classifier.current.predictClass(activation);
 
-        if (result.label === region.id) {
-          conf = result.confidences[result.label] || 0;
+        if (result.label === label) {
+          conf = result.confidences[label] || 0;
           if (conf >= threshold) {
             resultStatus = 'ok';
           }
         } else {
-          conf = result.confidences[region.id] || 0;
+          conf = result.confidences[label] || 0;
           resultStatus = 'bad';
         }
+
+        // Debug Log
+        // console.log(`Region: ${label}, Predicted: ${result.label}, Conf: ${conf}`);
 
       } catch (e) {
         console.log(e);
@@ -658,67 +878,79 @@ const App = () => {
   };
 
   // --- Excluir Todas as Fotos ---
+  // --- Excluir Todas as Fotos e Resetar ---
   const handleDeleteAllPhotos = async () => {
+    if (!selectedModel) return;
+
     const confirmDelete = window.confirm(
-      '⚠️ ATENÇÃO: Isso vai excluir TODAS as fotos do modelo atual do banco de dados e resetar o treinamento local. Tem certeza?'
+      '⚠️ ATENÇÃO: Isso vai excluir TODOS os objetos e TODAS as fotos deste modelo (Nuvem e Local). O modelo voltará ao estado inicial. Tem certeza?'
     );
 
     if (!confirmDelete) return;
 
     try {
-      setActionMessage('Excluindo fotos...');
+      setActionMessage('Excluindo tudo...');
       setActionMessageType('warning');
 
-      // 1. Excluir do Supabase
-      if (currentModel) {
-        const tableName = currentModel.toLowerCase().includes('polo') ? 'polo' : 'tera';
+      const modelId = getCurrentModelId();
 
-        // Excluir todas as linhas da tabela do modelo atual
-        const { error: modelError } = await supabase
-          .from(tableName)
-          .delete()
-          .neq('id', 0); // Delete all rows (workaround: delete where id != 0 deletes everything)
+      // 1. Cloud Cleanup
+      if (modelId) {
+        // Get all files to delete
+        const { data: samples } = await supabase
+          .from('training_samples')
+          .select('image_path')
+          .eq('model_id', modelId);
 
-        if (modelError) {
-          console.error('Erro ao excluir fotos do modelo:', modelError);
-        }
+        if (samples && samples.length > 0) {
+          const paths = samples.map(s => s.image_path);
+          // Delete from bucket
+          await supabase.storage.from('training_datasets').remove(paths);
 
-        // Excluir fotos de fundo
-        const { error: bgError } = await supabase
-          .from('fotofundo')
-          .delete()
-          .neq('id', 0);
-
-        if (bgError) {
-          console.error('Erro ao excluir fotos de fundo:', bgError);
+          // Delete from table
+          await supabase.from('training_samples').delete().eq('model_id', modelId);
         }
       }
 
-      // 2. Limpar classificador local
+      // 2. Local Cleanup
+      // deleteImagesByModel deletes everything with `model` index matching selectedModel
+      await deleteImagesByModel(selectedModel);
+      // Also need to clear background? Currently background might be saved as 'background' or 'model::background'. 
+      // In addBackgroundExample we used: saveImage(selectedModel, 'background', ...) -> So it has model=selectedModel.
+      // So deleteImagesByModel(selectedModel) should catch it.
+
+      // 3. Clear Classifier
       if (classifier.current) {
         classifier.current.clearAllClasses();
       }
 
-      // 3. Resetar estado local
-      setRegions(prev => prev.map(r => ({ ...r, samples: 0, status: null, confidence: 0 })));
+      // 4. Reset Configurations (Keep 1 empty region)
+      const defaultRegions = [{
+        id: Date.now().toString(),
+        name: `Objeto 1 (${selectedModel})`,
+        box: { x: 50, y: 50, w: 150, h: 150 },
+        samples: 0, status: null, confidence: 0
+      }];
+
+      setRegions(defaultRegions);
       setBackgroundSamples(0);
+      setActiveRegionId(defaultRegions[0].id);
 
-      // 4. Limpar localStorage
-      if (selectedModel) {
-        localStorage.removeItem(`model_${selectedModel}`);
-        if (modelsData.current[selectedModel]) {
-          modelsData.current[selectedModel].dataset = null;
-          modelsData.current[selectedModel].backgroundSamples = 0;
-        }
+      // 5. Save Reset Config to Cloud
+      // Update ref immediately so saveModelConfig works
+      if (modelsData.current[selectedModel]) {
+        modelsData.current[selectedModel].regions = defaultRegions;
+        modelsData.current[selectedModel].backgroundSamples = 0;
       }
+      await saveModelConfig(selectedModel);
 
-      setActionMessage('✅ Todas as fotos foram excluídas!');
+      setActionMessage('✅ Modelo resetado com sucesso!');
       setActionMessageType('success');
       setTimeout(() => setActionMessage(null), 3000);
 
     } catch (err) {
-      console.error('Erro ao excluir fotos:', err);
-      setActionMessage('❌ Erro ao excluir fotos');
+      console.error('Erro ao resetar modelo:', err);
+      setActionMessage('❌ Erro ao resetar modelo');
       setActionMessageType('error');
       setTimeout(() => setActionMessage(null), 3000);
     }
@@ -743,20 +975,131 @@ const App = () => {
     return () => { if (predictRef.current) cancelAnimationFrame(predictRef.current); };
   }, [isPredicting, currentBarcode, threshold]);
 
-  const saveToHistory = () => {
+  const uploadImage = async (base64Image, barcode) => {
+    try {
+      const blob = await fetch(base64Image).then(res => res.blob());
+      const filename = `${Date.now()}_${barcode}.jpg`;
+      const { data, error } = await supabase.storage
+        .from('inspection_snapshots')
+        .upload(filename, blob);
+
+      if (error) throw error;
+
+      const { data: { publicUrl } } = supabase.storage
+        .from('inspection_snapshots')
+        .getPublicUrl(filename);
+
+      return publicUrl;
+    } catch (error) {
+      console.error('Error uploading image:', error);
+      return null;
+    }
+  };
+
+  /* --- Capture Logic --- */
+  const captureFullScreenshot = () => {
+    if (!videoRef.current || !canvasRef.current) return null;
+
+    const video = videoRef.current;
+
+    // Create an off-screen canvas matching the video's intrinsic resolution
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = video.videoWidth;
+    offCanvas.height = video.videoHeight;
+    const ctx = offCanvas.getContext('2d');
+
+    if (offCanvas.width === 0 || offCanvas.height === 0) return null;
+
+    // 1. Draw the Video Frame
+    ctx.drawImage(video, 0, 0, offCanvas.width, offCanvas.height);
+
+    // 2. Draw Overlays (Regions & Status)
+    // We need to map the normalized regions (if they were normalized) or just use them directly 
+    // since they seem to be stored in intrinsic coordinates (based on getCropTensor logic)
+    regions.forEach(region => {
+      const { x, y, w, h } = region.box;
+
+      let strokeColor = '#3b82f6'; // blue default
+      if (region.status === 'ok') strokeColor = '#22c55e'; // green
+      else if (region.status === 'bad') strokeColor = '#ef4444'; // red
+
+      // Draw Box
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = strokeColor;
+      ctx.strokeRect(x, y, w, h);
+
+      // Draw Label Background
+      const labelText = region.status ? (region.status === 'ok' ? 'OK' : 'FALHA') : region.name;
+      ctx.font = 'bold 12px sans-serif';
+      const textMetrics = ctx.measureText(labelText);
+      const textWidth = textMetrics.width;
+      const textHeight = 16;
+
+      ctx.fillStyle = strokeColor;
+      ctx.fillRect(x, y - textHeight, textWidth + 10, textHeight);
+
+      // Draw Label Text
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(labelText, x + 5, y - 4);
+    });
+
+    // 3. Draw Global Status (Approved/Rejected) watermark
+    const allOk = regions.every(r => r.status === 'ok');
+    const globalStatus = allOk ? 'APROVADO' : 'REPROVADO';
+    const statusColor = allOk ? '#22c55e' : '#ef4444';
+
+    ctx.save();
+    ctx.font = 'bold 24px sans-serif';
+    ctx.fillStyle = statusColor;
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 1; // Subtle stroke
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+
+    // Draw at bottom right with some padding
+    ctx.strokeText(globalStatus, offCanvas.width - 15, offCanvas.height - 15);
+    ctx.fillText(globalStatus, offCanvas.width - 15, offCanvas.height - 15);
+    ctx.restore();
+
+    return offCanvas.toDataURL('image/jpeg', 0.8);
+  };
+
+  const saveToHistory = async () => {
     const allOk = regions.every(r => r.status === 'ok');
 
-    let snapshot = null;
-    if (canvasRef.current) {
-      snapshot = canvasRef.current.toDataURL('image/jpeg', 0.5);
+    let snapshot = captureFullScreenshot();
+
+    // Save to Supabase
+    let imageUrl = null;
+    if (snapshot) {
+      imageUrl = await uploadImage(snapshot, currentBarcode);
+    }
+
+    const newInspection = {
+      barcode: currentBarcode,
+      model_name: selectedModel,
+      status: allOk ? 'APROVADO' : 'REPROVADO',
+      image_url: imageUrl,
+      details: regions.map(r => ({
+        name: r.name,
+        status: r.status,
+        confidence: r.confidence
+      }))
+    };
+
+    const { data, error } = await supabase.from('inspections').insert([newInspection]).select();
+
+    if (error) {
+      console.error('Error saving inspection:', error);
+      // alert('Erro ao salvar inspeção no servidor.'); // Opcional: alertar o usuário
     }
 
     const newEntry = {
-      id: Date.now(),
+      id: data ? data[0].id : Date.now(),
       code: currentBarcode,
       timestamp: new Date().toLocaleString(),
       status: allOk ? 'APROVADO' : 'REPROVADO',
-      image: snapshot,
+      image: snapshot, // Use base64 locally for instant feedback
       details: regions.map(r => `${r.name}: ${r.status === 'ok' ? 'OK' : 'FALHA'}`).join(', ')
     };
 
@@ -775,6 +1118,47 @@ const App = () => {
 
 
 
+  // Helper para calcular métricas de exibição do vídeo (considerando object-fit: contain)
+  const getVideoContentRect = () => {
+    if (!videoRef.current || !canvasRef.current) return null;
+    const video = videoRef.current;
+    const rect = canvasRef.current.getBoundingClientRect(); // Tamanho do container
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const cw = rect.width;
+    const ch = rect.height;
+
+    if (!vw || !vh || !cw || !ch) return null;
+
+    const videoRatio = vw / vh;
+    const containerRatio = cw / ch;
+
+    let drawWidth, drawHeight, offsetX, offsetY;
+
+    if (containerRatio > videoRatio) {
+      // Container é mais largo -> Pillarbox (barras laterais)
+      drawHeight = ch;
+      drawWidth = ch * videoRatio;
+      offsetX = (cw - drawWidth) / 2;
+      offsetY = 0;
+    } else {
+      // Container é mais alto -> Letterbox (barras topo/baixo)
+      drawWidth = cw;
+      drawHeight = cw / videoRatio;
+      offsetX = 0;
+      offsetY = (ch - drawHeight) / 2;
+    }
+
+    return {
+      rect,       // BoundingClientRect do container
+      offsetX,    // Offset X visual do vídeo
+      offsetY,    // Offset Y visual do vídeo
+      scale: vw / drawWidth, // Fator para converter pixels de tela para pixels do vídeo
+      drawScale: drawWidth / vw // Fator para converter pixels do vídeo para pixels de tela
+    };
+  };
+
   // --- Loop Visual ---
   const loop = () => {
     if (!canvasRef.current || !videoRef.current) {
@@ -790,6 +1174,19 @@ const App = () => {
     }
 
     ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+
+    const metrics = getVideoContentRect();
+    if (!metrics) {
+      requestRef.current = requestAnimationFrame(loop);
+      return;
+    }
+
+    const { offsetX, offsetY, drawScale } = metrics;
+
+    ctx.save();
+    ctx.translate(offsetX, offsetY);
+    ctx.scale(drawScale, drawScale);
+
     const currentRegions = regionsRef.current;
 
     currentRegions.forEach(region => {
@@ -809,8 +1206,9 @@ const App = () => {
         lineWidth = isActive ? 3 : 2;
       }
 
+      // Compensar a escala da linha para não ficar muito fina/grossa
+      ctx.lineWidth = lineWidth / drawScale;
       ctx.strokeStyle = strokeColor;
-      ctx.lineWidth = lineWidth;
 
       ctx.setLineDash(viewMode === 'setup' && !isActive ? [5, 5] : []);
       ctx.strokeRect(x, y, w, h);
@@ -819,20 +1217,30 @@ const App = () => {
       if (viewMode === 'setup' || (viewMode === 'operator' && currentBarcode)) {
         ctx.fillStyle = strokeColor;
         const labelText = viewMode === 'operator' && region.status ? (region.status === 'ok' ? 'OK' : 'FALHA') : region.name;
+        // Reset scale for text to ensure sharpness? Or just draw scaled.
+        // Drawing scaled text might be blurry or distorted.
+        // Better to calculate position and draw unscaled text?
+        // For simplicity, let's keep drawing in transformed space but adjust size.
+
+        ctx.font = `bold ${12 / drawScale}px sans-serif`;
         const textWidth = ctx.measureText(labelText).width;
-        ctx.fillRect(x, y - 22, textWidth + 16, 22);
+
+        ctx.fillRect(x, y - (22 / drawScale), textWidth + (16 / drawScale), (22 / drawScale));
+
         ctx.fillStyle = (viewMode === 'operator' && region.status) ? '#fff' : '#000';
-        ctx.font = 'bold 12px sans-serif';
-        ctx.fillText(labelText, x + 4, y - 6);
+        ctx.fillText(labelText, x + (4 / drawScale), y - (6 / drawScale));
       }
 
       if (viewMode === 'setup' && isActive) {
         ctx.fillStyle = '#fbbf24';
         ctx.beginPath();
-        ctx.arc(x + w, y + h, 8, 0, 2 * Math.PI);
+        // Resize handle
+        ctx.arc(x + w, y + h, 8 / drawScale, 0, 2 * Math.PI);
         ctx.fill();
       }
     });
+
+    ctx.restore();
     requestRef.current = requestAnimationFrame(loop);
   };
 
@@ -843,7 +1251,7 @@ const App = () => {
 
   const handleModelSelect = (modelName) => {
     isSwitchingRef.current = true;
-    if (selectedModel) saveModelToLocal(selectedModel);
+    if (selectedModel) saveModelConfig(selectedModel);
     setSelectedModel(modelName);
     const stored = loadModelFromLocal(modelName);
     if (classifier.current) {
@@ -851,14 +1259,20 @@ const App = () => {
       if (stored && stored.dataset) {
         const ds = deserializeDataset(stored.dataset);
         if (ds) classifier.current.setClassifierDataset(ds);
-      } else {
-        const nextData = modelsData.current[modelName];
-        if (nextData && nextData.dataset) {
-          classifier.current.setClassifierDataset(nextData.dataset);
-        }
+      } else if (modelsData.current[modelName] && modelsData.current[modelName].dataset) {
+        classifier.current.setClassifierDataset(modelsData.current[modelName].dataset);
       }
     }
-    const sourceRegions = (stored && stored.regions) ? stored.regions : modelsData.current[modelName].regions;
+
+    // Default structure for new models if not found in cache or storage
+    const defaultStructure = {
+      regions: [{ id: '1', name: `Objeto 1 (${modelName})`, box: { x: 50, y: 50, w: 150, h: 150 }, samples: 0, status: null, confidence: 0 }],
+      backgroundSamples: 0
+    };
+
+    const sourceData = stored || modelsData.current[modelName] || defaultStructure;
+    const sourceRegions = sourceData.regions;
+
     const newRegions = (sourceRegions || []).map(r => ({
       id: r.id,
       name: r.name,
@@ -869,14 +1283,93 @@ const App = () => {
     }));
     setRegions(newRegions);
     if (newRegions.length > 0) setActiveRegionId(newRegions[0].id);
-    setBackgroundSamples((stored && stored.backgroundSamples != null) ? stored.backgroundSamples : (modelsData.current[modelName].backgroundSamples || 0));
+
+    const bgSamples = sourceData.backgroundSamples != null ? sourceData.backgroundSamples : 0;
+    setBackgroundSamples(bgSamples);
+
     setViewMode('setup');
     setIsPredicting(false);
     setCurrentBarcode('');
     setTimeout(() => { isSwitchingRef.current = false; }, 0);
   };
 
+  /* --- Cloud Sync & Loading --- */
+  const handleStartScreenModelSelect = async (modelName) => {
+    setIsSyncing(true);
+    setSyncStatus('Iniciando sincronização...');
+
+    try {
+      // 1. Find Model Config
+      const modelObj = availableModels.find(m => m.name === modelName);
+      if (!modelObj) throw new Error("Modelo não encontrado");
+
+      // 2. Load Config into Memory/Cache
+      // Assuming 'config' matches our internal structure or needs adaptation
+      // We'll update the 'modelsData' ref which is used by `handleModelSelect`
+      modelsData.current[modelName] = {
+        regions: modelObj.config.regions || [],
+        backgroundSamples: modelObj.config.backgroundSamples || 0,
+        dataset: null // Will be trained from images
+      };
+
+      // 3. Clear Local Training Images
+      await clearAllImages();
+
+      // 4. Fetch Samples List
+      setSyncStatus('Buscando imagens na nuvem...');
+      const { data: samples, error: samplesError } = await supabase
+        .from('training_samples')
+        .select('*')
+        .eq('model_id', modelObj.id);
+
+      if (samplesError) throw samplesError;
+
+      if (samples && samples.length > 0) {
+        setSyncStatus(`Baixando ${samples.length} imagens...`);
+
+        // 5. Download Images
+        const imagesToInsert = [];
+        for (let i = 0; i < samples.length; i++) {
+          const sample = samples[i];
+          const { data: blob } = await supabase.storage.from('training_datasets').download(sample.image_path);
+          if (blob) {
+            const url = URL.createObjectURL(blob);
+            imagesToInsert.push({
+              model: modelName, // IndexedDB uses name currently
+              label: sample.label,
+              url: url
+            });
+          }
+          if (i % 5 === 0) setSyncStatus(`Baixando ${i + 1}/${samples.length}...`);
+        }
+
+        // 6. Bulk Insert to Local DB
+        setSyncStatus('Salvando localmente...');
+        await bulkInsertImages(imagesToInsert);
+      }
+
+      setSyncStatus('Finalizando...');
+      handleModelSelect(modelName);
+      setViewMode('operator');
+
+    } catch (e) {
+      console.error("Sync Error:", e);
+      alert("Erro ao sincronizar modelo: " + e.message);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   if (!selectedModel) {
+    if (isSyncing) {
+      return (
+        <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center flex-col">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mb-4"></div>
+          <h2 className="text-xl font-bold">{syncStatus}</h2>
+        </div>
+      );
+    }
+
     return (
       <div className="min-h-screen bg-slate-950 text-white font-sans flex items-center justify-center p-4">
         <div className="max-w-md w-full bg-slate-900 rounded-2xl border border-slate-800 shadow-2xl p-8 text-center">
@@ -886,21 +1379,24 @@ const App = () => {
           <h1 className="text-2xl font-bold mb-2">Selecione o Modelo</h1>
           <p className="text-slate-400 mb-8">Escolha o veículo para carregar as configurações de inspeção.</p>
 
-          <div className="space-y-3">
-            <button
-              onClick={() => handleModelSelect('Polo Track')}
-              className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-blue-500/50 p-4 rounded-xl flex items-center justify-between group transition-all"
-            >
-              <span className="font-bold text-lg group-hover:text-blue-400 transition-colors">Polo Track</span>
-              <ArrowRight size={20} className="text-slate-600 group-hover:text-blue-500" />
-            </button>
+          <div className="space-y-3 max-h-96 overflow-y-auto">
+            {availableModels.map(model => (
+              <button
+                key={model.id}
+                onClick={() => handleStartScreenModelSelect(model.name)}
+                className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-blue-500/50 p-4 rounded-xl flex items-center justify-between group transition-all"
+              >
+                <span className="font-bold text-lg group-hover:text-blue-400 transition-colors uppercase">{model.name}</span>
+                <ArrowRight size={20} className="text-slate-600 group-hover:text-blue-500" />
+              </button>
+            ))}
 
             <button
-              onClick={() => handleModelSelect('Tera')}
-              className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-blue-500/50 p-4 rounded-xl flex items-center justify-between group transition-all"
+              onClick={handleAddModel}
+              className="w-full bg-blue-600/10 hover:bg-blue-600/20 border border-blue-500/30 border-dashed p-4 rounded-xl flex items-center justify-center gap-2 group transition-all"
             >
-              <span className="font-bold text-lg group-hover:text-blue-400 transition-colors">Tera</span>
-              <ArrowRight size={20} className="text-slate-600 group-hover:text-blue-500" />
+              <Plus size={20} className="text-blue-500" />
+              <span className="font-bold text-blue-500">CRIAR NOVO MODELO</span>
             </button>
           </div>
         </div>
@@ -919,19 +1415,28 @@ const App = () => {
   const handleMouseDown = (e) => {
     if (viewMode !== 'setup') return;
     const { x, y } = getClientCoordinates(e);
-    const rect = canvasRef.current.getBoundingClientRect();
-    const scaleX = videoRef.current ? videoRef.current.videoWidth / rect.width : 1;
-    const scaleY = videoRef.current ? videoRef.current.videoHeight / rect.height : 1;
-    const mouseX = (x - rect.left) * scaleX;
-    const mouseY = (y - rect.top) * scaleY;
 
-    // Check resize handles first (simple 10px threshold)
+    const metrics = getVideoContentRect();
+    if (!metrics) return;
+
+    const { rect, offsetX, offsetY, scale } = metrics;
+
+    // Converte coordenadas da tela para pixels intrínsecos do video
+    const mouseX = ((x - rect.left) - offsetX) * scale;
+    const mouseY = ((y - rect.top) - offsetY) * scale;
+
+    // Threshold em pixels de tela para facilitar o clique (30px)
+    const RESIZE_THRESHOLD = 30 * scale;
+
+    // Check resize handles first
     const activeRegion = regions.find(r => r.id === activeRegionId);
     if (activeRegion) {
       const { x: rx, y: ry, w: rw, h: rh } = activeRegion.box;
-      if (Math.abs(mouseX - (rx + rw)) < 20 && Math.abs(mouseY - (ry + rh)) < 20) {
+      const dist = Math.sqrt(Math.pow(mouseX - (rx + rw), 2) + Math.pow(mouseY - (ry + rh), 2));
+
+      if (dist < RESIZE_THRESHOLD) {
         setInteractionMode('resize');
-        setDragStart({ x: mouseX, y: mouseY });
+        dragStartRef.current = { x: mouseX, y: mouseY };
         return;
       }
     }
@@ -945,21 +1450,23 @@ const App = () => {
     if (clickedRegion) {
       setActiveRegionId(clickedRegion.id);
       setInteractionMode('move');
-      setDragStart({ x: mouseX, y: mouseY });
+      dragStartRef.current = { x: mouseX, y: mouseY };
     }
   };
 
   const handleMouseMove = (e) => {
     if (viewMode !== 'setup' || interactionMode === 'none') return;
     const { x, y } = getClientCoordinates(e);
-    const rect = canvasRef.current.getBoundingClientRect();
-    const scaleX = videoRef.current ? videoRef.current.videoWidth / rect.width : 1;
-    const scaleY = videoRef.current ? videoRef.current.videoHeight / rect.height : 1;
-    const mouseX = (x - rect.left) * scaleX;
-    const mouseY = (y - rect.top) * scaleY;
 
-    const dx = mouseX - dragStart.x;
-    const dy = mouseY - dragStart.y;
+    const metrics = getVideoContentRect();
+    if (!metrics) return;
+
+    const { rect, offsetX, offsetY, scale } = metrics;
+    const mouseX = ((x - rect.left) - offsetX) * scale;
+    const mouseY = ((y - rect.top) - offsetY) * scale;
+
+    const dx = mouseX - dragStartRef.current.x;
+    const dy = mouseY - dragStartRef.current.y;
 
     setRegions(prev => {
       const updated = prev.map(r => {
@@ -977,6 +1484,9 @@ const App = () => {
         return r;
       });
 
+      // Sincroniza refs imediatamente para garantir fluidez no Canvas
+      regionsRef.current = updated;
+
       // Update local storage ref immediately for persistence
       if (selectedModel && modelsData.current[selectedModel]) {
         modelsData.current[selectedModel].regions = updated.map(r => ({ ...r, box: { ...r.box } }));
@@ -985,13 +1495,13 @@ const App = () => {
       return updated;
     });
 
-    setDragStart({ x: mouseX, y: mouseY });
+    dragStartRef.current = { x: mouseX, y: mouseY };
   };
 
   const handleMouseUp = () => {
     if (interactionMode !== 'none') {
       setInteractionMode('none');
-      if (selectedModel) saveModelToLocal(selectedModel);
+      if (selectedModel) saveModelConfig(selectedModel);
     }
   };
 
@@ -1127,16 +1637,31 @@ const App = () => {
 
                 {/* Seletor de Modelo de Carro */}
                 <div className="bg-slate-800 p-3 rounded-lg mb-3">
-                  <label className="text-xs text-slate-400 block mb-1 flex items-center gap-1">
-                    <Car size={12} /> Modelo do Carro
-                  </label>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="text-xs text-slate-400 flex items-center gap-1">
+                      <Car size={12} /> Modelo do Carro
+                    </label>
+                    <div className="flex gap-2">
+                      <button onClick={handleEditModel} title="Renomear Modelo" className="text-slate-400 hover:text-blue-400 transition-colors">
+                        <Pencil size={12} />
+                      </button>
+                      <button onClick={handleDeleteModel} title="Excluir Modelo" className="text-slate-400 hover:text-red-400 transition-colors">
+                        <Trash2 size={12} />
+                      </button>
+                      <button onClick={handleAddModel} className="text-[10px] text-blue-400 hover:text-blue-300 font-bold flex items-center gap-0.5 ml-1">
+                        <Plus size={10} /> NOVO
+                      </button>
+                    </div>
+                  </div>
                   <select
                     className="w-full bg-slate-700 text-white text-xs rounded p-2 border border-slate-600 outline-none"
                     value={selectedModel || ''}
                     onChange={(e) => handleModelSelect(e.target.value)}
                   >
-                    <option value="Polo Track">Polo Track</option>
-                    <option value="Tera">Tera</option>
+
+                    {availableModels.map(model => (
+                      <option key={model.id} value={model.name}>{model.name}</option>
+                    ))}
                   </select>
                 </div>
 
@@ -1153,8 +1678,14 @@ const App = () => {
                   />
                 </div>
 
-                <button onClick={addRegion} className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-blue-400 text-xs font-bold rounded border border-slate-700 flex justify-center items-center gap-1">
+                <button onClick={addRegion} className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-blue-400 text-xs font-bold rounded border border-slate-700 flex justify-center items-center gap-1 mb-2">
                   <Plus size={14} /> NOVO OBJETO
+                </button>
+                <button
+                  onClick={() => setShowHistory(true)}
+                  className="w-full py-2 bg-blue-600/10 hover:bg-blue-600/20 text-blue-500 hover:text-blue-400 text-xs font-bold rounded border border-blue-500/20 flex justify-center items-center gap-1"
+                >
+                  <Database size={14} /> HISTÓRICO COMPLETO
                 </button>
               </div>
 
@@ -1174,7 +1705,7 @@ const App = () => {
                           setRegions(prev => prev.map(reg => reg.id === r.id ? { ...reg, name: val } : reg));
                         }}
                       />
-                      <button onClick={(e) => { e.stopPropagation(); removeRegion(r.id) }} className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-500"><Trash2 size={14} /></button>
+                      <button onClick={(e) => { e.stopPropagation(); handleDeleteRegion(r.id) }} className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-500"><Trash2 size={14} /></button>
                     </div>
 
                     {r.id === activeRegionId && (
@@ -1223,6 +1754,26 @@ const App = () => {
             <div className="flex flex-col h-full">
               <div className="p-4 bg-slate-800 border-b border-slate-700">
                 <h2 className="font-bold text-white mb-1 flex items-center gap-2"><Eye size={16} /> Inspeção Ativa</h2>
+
+                {/* Operator Camera Selector */}
+                <div className="mt-4 mb-4">
+                  <label className="text-xs text-slate-400 block mb-1 flex items-center gap-1">
+                    <Camera size={12} /> Câmera
+                  </label>
+                  <select
+                    className="w-full bg-slate-900 text-white text-xs rounded p-2 border border-slate-600 outline-none focus:border-blue-500"
+                    value={selectedDeviceId}
+                    onChange={handleCameraChange}
+                  >
+                    {videoDevices.map(device => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.label || `Câmera ${device.deviceId.slice(0, 5)}...`}
+                      </option>
+                    ))}
+                    {videoDevices.length === 0 && <option>Nenhuma câmera detectada</option>}
+                  </select>
+                </div>
+
                 {currentBarcode ? (
                   <div className="mt-2 bg-slate-900 p-2 rounded border border-slate-600 flex justify-between items-center">
                     <span className="text-xs text-slate-400">Peça:</span>
@@ -1296,6 +1847,8 @@ const App = () => {
         </div>
 
       </div>
+      {/* History Modal */}
+      {showHistory && <InspectionHistory onClose={() => setShowHistory(false)} />}
     </div>
   );
 };
