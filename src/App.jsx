@@ -114,6 +114,10 @@ const App = () => {
   // History Modal
   const [showHistory, setShowHistory] = useState(false);
 
+  // --- XAI & Trustworthiness States ---
+  const [isGuardrailActive, setIsGuardrailActive] = useState(false);
+  const [heatmapData, setHeatmapData] = useState({}); // { regionId: heatmapImageBase64 }
+
   // --- Car Model Logic ---
   const [selectedModel, setSelectedModel] = useState(null);
   // Store full model objects: {id, name, config}
@@ -914,8 +918,76 @@ const App = () => {
     if (successCount > 0) setBackgroundSamples(prev => prev + 1);
   };
 
+  const generateHeatmap = async (video, box) => {
+    if (!mobilenetModel.current) return null;
+
+    return tf.tidy(() => {
+      const img = tf.browser.fromPixels(video);
+      let startX = Math.floor(box.x);
+      let startY = Math.floor(box.y);
+      let width = Math.floor(box.w);
+      let height = Math.floor(box.h);
+
+      startX = Math.max(0, startX);
+      startY = Math.max(0, startY);
+      if (startX + width > video.videoWidth) width = video.videoWidth - startX;
+      if (startY + height > video.videoHeight) height = video.videoHeight - startY;
+
+      if (width <= 0 || height <= 0) return null;
+
+      const crop = img.slice([startY, startX, 0], [height, width, 3]);
+      const resized = tf.image.resizeBilinear(crop, [224, 224]);
+      const batched = resized.reshape([1, 224, 224, 3]);
+      const normalized = batched.toFloat().div(tf.scalar(127.5)).sub(tf.scalar(1));
+
+      const model = mobilenetModel.current.model;
+      
+      let activation;
+      try {
+        const layer = model.getLayer('out_relu') || model.layers[model.layers.length - 2];
+        const intermediateModel = tf.model({inputs: model.inputs, outputs: layer.output});
+        activation = intermediateModel.predict(normalized);
+      } catch (e) {
+        activation = model.predict(normalized);
+      }
+
+      const heatmap = activation.mean(3).squeeze();
+      const min = heatmap.min();
+      const max = heatmap.max();
+      const normalizedHeatmap = heatmap.sub(min).div(max.sub(min));
+      
+      const resizedHeatmap = tf.image.resizeBilinear(normalizedHeatmap.expandDims(2), [height, width]).squeeze();
+      return resizedHeatmap;
+    });
+  };
+
+  const heatmapToCanvas = (heatmapTensor) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = heatmapTensor.shape[1];
+    canvas.height = heatmapTensor.shape[0];
+    const ctx = canvas.getContext('2d');
+    
+    const data = heatmapTensor.dataSync();
+    const imgData = ctx.createImageData(canvas.width, canvas.height);
+    
+    for (let i = 0; i < data.length; i++) {
+      const val = data[i];
+      const idx = i * 4;
+      imgData.data[idx] = 255; 
+      imgData.data[idx+1] = 0; 
+      imgData.data[idx+2] = 0; 
+      imgData.data[idx+3] = val * 200; 
+    }
+    
+    ctx.putImageData(imgData, 0, 0);
+    return canvas.toDataURL();
+  };
+
   const predictAllRegions = async () => {
     if (!classifier.current || classifier.current.getNumClasses() === 0) return;
+
+    const newHeatmaps = {};
+    let guardrailTriggered = false;
 
     const updatedRegions = await Promise.all(regions.map(async (region) => {
       if (region.samples === 0 && backgroundSamples === 0) return { ...region, status: null, confidence: 0 };
@@ -940,8 +1012,17 @@ const App = () => {
           resultStatus = 'bad';
         }
 
-        // Debug Log
-        // console.log(`Region: ${label}, Predicted: ${result.label}, Conf: ${conf}`);
+        if (conf < 0.90) {
+          guardrailTriggered = true;
+        }
+
+        if (resultStatus === 'bad') {
+          const heatmapTensor = await generateHeatmap(videoRef.current, region.box);
+          if (heatmapTensor) {
+            newHeatmaps[region.id] = heatmapToCanvas(heatmapTensor);
+            heatmapTensor.dispose();
+          }
+        }
 
       } catch (e) {
         console.log(e);
@@ -953,7 +1034,10 @@ const App = () => {
     }));
 
     setRegions(updatedRegions);
+    setHeatmapData(newHeatmaps);
+    setIsGuardrailActive(guardrailTriggered);
   };
+
 
   // --- Excluir Todas as Fotos ---
   // --- Excluir Todas as Fotos e Resetar ---
@@ -1998,6 +2082,43 @@ const App = () => {
                 )}
               </div>
             )}
+
+            {/* --- XAI: HEATMAPS --- */}
+            {viewMode === 'operator' && Object.keys(heatmapData).map(regionId => {
+              const region = regions.find(r => r.id === regionId);
+              if (!region) return null;
+              const metrics = getVideoContentRect();
+              if (!metrics) return null;
+              const { drawScale, offsetX, offsetY } = metrics;
+
+              return (
+                <img 
+                  key={`heatmap-${regionId}`}
+                  src={heatmapData[regionId]}
+                  className="absolute heatmap-canvas z-10"
+                  style={{
+                    left: offsetX + (region.box.x * drawScale),
+                    top: offsetY + (region.box.y * drawScale),
+                    width: region.box.w * drawScale,
+                    height: region.box.h * drawScale
+                  }}
+                  alt="XAI Heatmap"
+                />
+              );
+            })}
+
+            {/* --- GUARDRAIL OVERLAY --- */}
+            {isGuardrailActive && viewMode === 'operator' && (
+              <div className="absolute inset-0 z-[60] flex flex-col items-center justify-center pointer-events-none animate-pulse-yellow border-4 border-yellow-500/50">
+                <div className="bg-yellow-500 text-slate-950 px-8 py-4 rounded-xl shadow-2xl flex items-center gap-4 animate-bounce pointer-events-auto">
+                  <AlertTriangle size={40} className="text-slate-900" />
+                  <div className="text-left">
+                    <p className="text-xl font-black uppercase leading-none">Revisão Humana Obrigatória</p>
+                    <p className="text-xs font-bold opacity-80">Confiança inferior a 90% detectada</p>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -2319,10 +2440,14 @@ const App = () => {
               <div className="p-4 border-t border-slate-800 bg-slate-900 space-y-3">
                 <button
                   onClick={saveToHistory}
-                  disabled={!currentBarcode}
-                  className="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg font-bold shadow-lg flex justify-center items-center gap-2 active:scale-95 transition-transform"
+                  disabled={!currentBarcode || isGuardrailActive}
+                  className={`w-full py-4 rounded-lg font-bold shadow-lg flex justify-center items-center gap-2 active:scale-95 transition-all
+                    ${isGuardrailActive ? 'bg-yellow-600 text-slate-900 cursor-not-allowed opacity-50' : 'bg-blue-600 hover:bg-blue-500 text-white'}
+                    ${!currentBarcode ? 'bg-slate-700 text-slate-500' : ''}
+                  `}
                 >
-                  <Save size={20} /> SALVAR & PRÓXIMO
+                  {isGuardrailActive ? <AlertTriangle size={20} /> : <Save size={20} />}
+                  {isGuardrailActive ? 'BLOQUEADO: REVISÃO NECESSÁRIA' : 'SALVAR & PRÓXIMO'}
                 </button>
 
                 <div className="pt-2 border-t border-slate-800">
